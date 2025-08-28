@@ -4,6 +4,7 @@ import threading
 import time  # Explicit import to ensure it's available for PyArrow
 import sys  # Ensure sys is available
 import atexit  # For automatic cleanup on exit
+import warnings
 from pathlib import Path
 from datetime import datetime, date, timezone
 from typing import Dict, Any, List, Optional
@@ -42,6 +43,37 @@ class ParquetLogger(BaseCallbackHandler):
         
         # Register flush to run on program exit
         atexit.register(self.flush)
+        
+        # Check if in notebook environment and warn if using default buffer_size
+        if self._is_notebook() and buffer_size == 100:
+            warnings.warn(
+                "\n⚠️  Notebook environment detected with default buffer_size=100.\n"
+                "   Logs will only write to disk after 100 LLM calls.\n"
+                "   \n"
+                "   For immediate writes in notebooks, use one of:\n"
+                "   \n"
+                "   Option 1 - Context manager (recommended):\n"
+                "       with ParquetLogger('./logs') as logger:\n"
+                "           llm.callbacks = [logger]\n"
+                "           response = llm.invoke('your prompt')\n"
+                "   \n"
+                "   Option 2 - Small buffer:\n"
+                "       logger = ParquetLogger('./logs', buffer_size=1)\n"
+                "   \n"
+                "   Option 3 - Manual flush:\n"
+                "       logger.flush()  # Call after your LLM operations\n",
+                stacklevel=2
+            )
+    
+    def _is_notebook(self) -> bool:
+        """Detect if running in a notebook environment."""
+        try:
+            from IPython import get_ipython
+            if get_ipython() is not None:
+                return True
+        except ImportError:
+            pass
+        return False
     
     def _safe_json_dumps(self, obj: Any) -> str:
         """Convert object to JSON string, handling UUIDs and other non-serializable types."""

@@ -31,6 +31,39 @@ llm.callbacks = [ParquetLogger("./logs")]
 response = llm.invoke("What is 2+2?")
 ```
 
+## Usage in Notebooks (Jupyter, Hex, Colab)
+
+⚠️ **Important**: In notebook environments, the default buffer size of 100 means logs only write to disk after 100 LLM calls. For immediate writes, use one of these approaches:
+
+### Option 1: Context Manager (Recommended)
+```python
+from langchain_callback_parquet_logger import ParquetLogger
+from langchain_openai import ChatOpenAI
+
+# Using context manager ensures logs are written when the block exits
+with ParquetLogger('./logs') as logger:
+    llm = ChatOpenAI(model="gpt-4")
+    llm.callbacks = [logger]
+    response = llm.invoke("What is 2+2?")
+# Logs are automatically flushed here
+```
+
+### Option 2: Small Buffer Size
+```python
+# Set buffer_size=1 to write after every LLM call
+logger = ParquetLogger('./logs', buffer_size=1)
+llm = ChatOpenAI(model="gpt-4", callbacks=[logger])
+response = llm.invoke("What is 2+2?")
+```
+
+### Option 3: Manual Flush
+```python
+logger = ParquetLogger('./logs')
+llm = ChatOpenAI(model="gpt-4", callbacks=[logger])
+response = llm.invoke("What is 2+2?")
+logger.flush()  # Manually write logs to disk
+```
+
 ## Configuration
 
 ### Parameters
