@@ -26,7 +26,7 @@ SCHEMA = pa.schema([
 class ParquetLogger(BaseCallbackHandler):
     """Simplified Parquet logger with flexible JSON payload schema."""
     
-    def __init__(self, log_dir: str = "./llm_logs", buffer_size: int = 100, provider: str = "openai", metadata: Optional[Dict[str, Any]] = None):
+    def __init__(self, log_dir: str = "./llm_logs", buffer_size: int = 100, provider: str = "openai", logger_metadata: Optional[Dict[str, Any]] = None):
         """
         Initialize the Parquet logger.
         
@@ -34,18 +34,18 @@ class ParquetLogger(BaseCallbackHandler):
             log_dir: Directory to save log files
             buffer_size: Number of entries to buffer before flushing to disk
             provider: LLM provider name (default: "openai")
-            metadata: Optional dictionary of metadata to include with all log entries
+            logger_metadata: Optional dictionary of metadata to include with all log entries
         """
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.buffer_size = buffer_size
         self.provider = provider
-        self.metadata = metadata or {}
+        self.logger_metadata = logger_metadata or {}
         # Safely serialize metadata with fallback
         try:
-            self.metadata_json = json.dumps(self.metadata, default=str)
+            self.logger_metadata_json = json.dumps(self.logger_metadata, default=str)
         except Exception:
-            self.metadata_json = "{}"  # Fallback to empty JSON if serialization fails
+            self.logger_metadata_json = "{}"  # Fallback to empty JSON if serialization fails
         
         self.buffer = []
         self.lock = threading.Lock()
@@ -123,7 +123,7 @@ class ParquetLogger(BaseCallbackHandler):
             'logger_custom_id': logger_custom_id,
             'event_type': 'llm_start',
             'provider': self.provider,
-            'logger_metadata': self.metadata_json,
+            'logger_metadata': self.logger_metadata_json,
             'payload': self._safe_json_dumps(payload_data)
         }
         self._add_entry(entry)
@@ -174,7 +174,7 @@ class ParquetLogger(BaseCallbackHandler):
             'logger_custom_id': logger_custom_id,
             'event_type': 'llm_end',
             'provider': self.provider,
-            'logger_metadata': self.metadata_json,
+            'logger_metadata': self.logger_metadata_json,
             'payload': self._safe_json_dumps(payload_data)
         }
         self._add_entry(entry)
@@ -215,7 +215,7 @@ class ParquetLogger(BaseCallbackHandler):
             'logger_custom_id': logger_custom_id,
             'event_type': 'llm_error',
             'provider': self.provider,
-            'logger_metadata': self.metadata_json,
+            'logger_metadata': self.logger_metadata_json,
             'payload': self._safe_json_dumps(payload_data)
         }
         self._add_entry(entry)

@@ -47,7 +47,7 @@ async def main():
         log_dir="./llm_batch_logs",  # Directory to save parquet files
         buffer_size=50,               # Flush to disk after 50 log entries
         provider="openai",            # LLM provider name for tracking
-        metadata={                    # Optional: logger-level metadata for all logs
+        logger_metadata={             # Optional: logger-level metadata for all logs
             "batch_type": "weather",
             "api_version": "v1"
         }

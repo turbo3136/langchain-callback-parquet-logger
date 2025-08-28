@@ -16,7 +16,7 @@ def main():
         log_dir="./llm_logs",
         buffer_size=10,  # Flush every 10 messages
         provider="openai",
-        metadata={  # Logger-level metadata included in all logs
+        logger_metadata={  # Logger-level metadata included in all logs
             "environment": "development",
             "service": "example-app",
             "version": "1.0.0"

@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "langchain-callback-parquet-logger"
-version = "0.1.4"
+version = "0.1.5"
 description = "A Parquet-based callback handler for logging LangChain LLM interactions"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
-    {name = "Brent Driscoll", email = "turbo3136@gmail.com"},
+    {name = "turbo3136", email = "turbo3136@gmail.com"},
 ]
 keywords = ["langchain", "logging", "parquet", "llm", "callback", "monitoring"]
 classifiers = [

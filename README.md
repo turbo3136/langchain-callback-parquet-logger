@@ -72,7 +72,7 @@ logger.flush()  # Manually write logs to disk
 - `log_dir` (str, default: "./llm_logs"): Directory for log files
 - `buffer_size` (int, default: 100): Number of entries before auto-flush
 - `provider` (str, default: "openai"): LLM provider name for tracking
-- `metadata` (dict, optional): Logger-level metadata included in all log entries
+- `logger_metadata` (dict, optional): Logger-level metadata included in all log entries
 
 ### Log Structure
 
@@ -210,7 +210,7 @@ Add metadata that's included with every log entry:
 ```python
 logger = ParquetLogger(
     log_dir="./logs",
-    metadata={
+    logger_metadata={
         "environment": "production",
         "service": "api-gateway",
         "version": "2.1.0"
