@@ -11,11 +11,16 @@ load_dotenv()
 
 
 def main():
-    # Create a logger instance
+    # Create a logger instance with metadata
     logger = ParquetLogger(
         log_dir="./llm_logs",
         buffer_size=10,  # Flush every 10 messages
-        provider="openai"
+        provider="openai",
+        metadata={  # Logger-level metadata included in all logs
+            "environment": "development",
+            "service": "example-app",
+            "version": "1.0.0"
+        }
     )
     
     # Initialize LLM with the logger
@@ -42,7 +47,11 @@ def main():
         print("-" * 40)
         
         try:
-            response = llm.invoke(question)
+            # You can include a logger_custom_id with each request for tracking
+            response = llm.invoke(
+                question,
+                metadata={"logger_custom_id": f"question-{i}"}  # Custom ID for this specific request
+            )
             print(f"Response: {response.content[:200]}...")  # Show first 200 chars
         except Exception as e:
             print(f"Error: {e}")

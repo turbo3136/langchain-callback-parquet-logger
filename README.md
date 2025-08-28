@@ -10,6 +10,7 @@ A high-performance callback handler for logging LangChain LLM interactions to Pa
 - 🔄 **Thread-Safe**: Safe for concurrent LLM calls
 - 📦 **Flexible Schema**: JSON payload for extensible logging
 - 🔒 **Automatic Cleanup**: Ensures buffers flush on exit
+- 🏷️ **Custom Tracking**: Add custom IDs and metadata to your logs
 
 ## Installation
 
@@ -71,6 +72,7 @@ logger.flush()  # Manually write logs to disk
 - `log_dir` (str, default: "./llm_logs"): Directory for log files
 - `buffer_size` (int, default: 100): Number of entries before auto-flush
 - `provider` (str, default: "openai"): LLM provider name for tracking
+- `metadata` (dict, optional): Logger-level metadata included in all log entries
 
 ### Log Structure
 
@@ -80,8 +82,10 @@ Logs are saved as Parquet files with the following schema:
 |--------|------|-------------|
 | timestamp | timestamp[us, tz=UTC] | Event timestamp |
 | run_id | string | Unique run identifier |
+| logger_custom_id | string | Optional custom ID for request tracking |
 | event_type | string | Event type (llm_start, llm_end, llm_error) |
 | provider | string | LLM provider name |
+| logger_metadata | string | JSON-encoded logger-level metadata |
 | payload | string | JSON-encoded event data |
 
 ### File Organization
@@ -150,6 +154,19 @@ summary = conn.execute("""
 
 print(summary)
 
+# Query using the new custom ID field
+custom_requests = conn.execute("""
+    SELECT 
+        logger_custom_id,
+        event_type,
+        json_extract_string(payload, '$.usage.total_tokens') as tokens
+    FROM read_parquet('./logs/**/*.parquet')
+    WHERE logger_custom_id != ''
+    ORDER BY timestamp
+""").df()
+
+print(f"Found {len(custom_requests)} requests with custom IDs")
+
 # Extract specific fields from JSON payload
 detailed = conn.execute("""
     SELECT 
@@ -183,6 +200,38 @@ for _, row in df.iterrows():
     payload = json.loads(row['payload'])
     print(f"Model: {payload.get('model_name', 'unknown')}")
     print(f"Tokens: {payload.get('usage', {}).get('total_tokens', 0)}")
+```
+
+## Metadata and Custom IDs
+
+### Logger-Level Metadata
+Add metadata that's included with every log entry:
+
+```python
+logger = ParquetLogger(
+    log_dir="./logs",
+    metadata={
+        "environment": "production",
+        "service": "api-gateway",
+        "version": "2.1.0"
+    }
+)
+```
+
+### Request-Level Custom IDs
+Track specific requests with custom IDs:
+
+```python
+response = llm.invoke(
+    "What is quantum computing?",
+    metadata={"logger_custom_id": "user-123-session-456-req-789"}
+)
+```
+
+### Checking Version
+```python
+import langchain_callback_parquet_logger
+print(langchain_callback_parquet_logger.__version__)
 ```
 
 ## Context Manager Usage

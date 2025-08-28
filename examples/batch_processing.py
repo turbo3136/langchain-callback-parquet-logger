@@ -46,7 +46,11 @@ async def main():
     with ParquetLogger(
         log_dir="./llm_batch_logs",  # Directory to save parquet files
         buffer_size=50,               # Flush to disk after 50 log entries
-        provider="openai"             # LLM provider name for tracking
+        provider="openai",            # LLM provider name for tracking
+        metadata={                    # Optional: logger-level metadata for all logs
+            "batch_type": "weather",
+            "api_version": "v1"
+        }
     ) as logger:
         
         # Initialize the LLM with Responses API
@@ -67,6 +71,9 @@ async def main():
         # Define function that processes each row with progress tracking
         async def process_row_with_progress(row: Dict[str, Any]) -> WeatherData:
             """Process a single input using web search and update progress."""
+            # Extract city name for custom ID (simple parsing)
+            city = row.get("input", "").split(" in ")[-1].split("?")[0].strip() if " in " in row.get("input", "") else "unknown"
+            
             # Pass web search tool directly - warning is harmless
             result = await structured_llm.ainvoke(
                 input=row.get("input"),
@@ -76,6 +83,8 @@ async def main():
                         "search_context_size": "low",
                     },
                 ],
+                # Add custom ID for tracking individual requests in the batch
+                metadata={"logger_custom_id": f"weather-batch-{city.lower().replace(' ', '-')}"}
             )
             await progress.update()  # Update progress after each completion
             return result
@@ -119,6 +128,13 @@ async def main():
         print(f"✅ Processed {len(results)} weather queries")
         print(f"📁 Logs saved to: ./llm_batch_logs/")
         print("=" * 80)
+        
+        # Note: The logs now include:
+        # - logger_custom_id: Unique ID for each city request (e.g., "weather-batch-new-york-city")
+        # - logger_metadata: Batch-level metadata (batch_type="weather", api_version="v1")
+        # You can query these fields when analyzing the parquet files
 
 if __name__ == "__main__":
     asyncio.run(main())
+    # if you're running this in a notebook, you should probably just use this:
+    # await main()  # should work because notebooks already use an asyncio event loop

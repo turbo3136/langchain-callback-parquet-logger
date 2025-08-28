@@ -16,15 +16,17 @@ from langchain_core.callbacks import BaseCallbackHandler
 SCHEMA = pa.schema([
     ("timestamp", pa.timestamp("us", tz="UTC")),
     ("run_id", pa.string()),
+    ("logger_custom_id", pa.string()),
     ("event_type", pa.string()),
     ("provider", pa.string()),
+    ("logger_metadata", pa.string()),
     ("payload", pa.string()),
 ])
 
 class ParquetLogger(BaseCallbackHandler):
     """Simplified Parquet logger with flexible JSON payload schema."""
     
-    def __init__(self, log_dir: str = "./llm_logs", buffer_size: int = 100, provider: str = "openai"):
+    def __init__(self, log_dir: str = "./llm_logs", buffer_size: int = 100, provider: str = "openai", metadata: Optional[Dict[str, Any]] = None):
         """
         Initialize the Parquet logger.
         
@@ -32,11 +34,18 @@ class ParquetLogger(BaseCallbackHandler):
             log_dir: Directory to save log files
             buffer_size: Number of entries to buffer before flushing to disk
             provider: LLM provider name (default: "openai")
+            metadata: Optional dictionary of metadata to include with all log entries
         """
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.buffer_size = buffer_size
         self.provider = provider
+        self.metadata = metadata or {}
+        # Safely serialize metadata with fallback
+        try:
+            self.metadata_json = json.dumps(self.metadata, default=str)
+        except Exception:
+            self.metadata_json = "{}"  # Fallback to empty JSON if serialization fails
         
         self.buffer = []
         self.lock = threading.Lock()
@@ -87,6 +96,15 @@ class ParquetLogger(BaseCallbackHandler):
     
     def on_llm_start(self, serialized: Dict, prompts: List[str], **kwargs):
         """Log LLM start event with all request data in payload."""
+        # Safely extract logger_custom_id from LangChain metadata
+        try:
+            langchain_metadata = kwargs.get('metadata', {}) or {}
+            custom_id_value = langchain_metadata.get('logger_custom_id', '')
+            # Convert to string, but handle None specially to become empty string
+            logger_custom_id = '' if custom_id_value is None else str(custom_id_value)
+        except (AttributeError, TypeError):
+            logger_custom_id = ''
+        
         payload_data = {
             'model': serialized.get('kwargs', {}).get('model_name', 'unknown'),
             'prompts': prompts,
@@ -102,14 +120,25 @@ class ParquetLogger(BaseCallbackHandler):
         entry = {
             'timestamp': datetime.now(timezone.utc),
             'run_id': str(kwargs.get('run_id', '')),
+            'logger_custom_id': logger_custom_id,
             'event_type': 'llm_start',
             'provider': self.provider,
+            'logger_metadata': self.metadata_json,
             'payload': self._safe_json_dumps(payload_data)
         }
         self._add_entry(entry)
     
     def on_llm_end(self, response, **kwargs):
         """Log LLM completion event with all response data in payload."""
+        # Safely extract logger_custom_id from LangChain metadata
+        try:
+            langchain_metadata = kwargs.get('metadata', {}) or {}
+            custom_id_value = langchain_metadata.get('logger_custom_id', '')
+            # Convert to string, but handle None specially to become empty string
+            logger_custom_id = '' if custom_id_value is None else str(custom_id_value)
+        except (AttributeError, TypeError):
+            logger_custom_id = ''
+        
         # Convert response to dict (handles all LangChain response types)
         try:
             if hasattr(response, 'dict'):
@@ -142,14 +171,25 @@ class ParquetLogger(BaseCallbackHandler):
         entry = {
             'timestamp': datetime.now(timezone.utc),
             'run_id': str(kwargs.get('run_id', '')),
+            'logger_custom_id': logger_custom_id,
             'event_type': 'llm_end',
             'provider': self.provider,
+            'logger_metadata': self.metadata_json,
             'payload': self._safe_json_dumps(payload_data)
         }
         self._add_entry(entry)
     
     def on_llm_error(self, error, **kwargs):
         """Log LLM error event with error details in payload."""
+        # Safely extract logger_custom_id from LangChain metadata
+        try:
+            langchain_metadata = kwargs.get('metadata', {}) or {}
+            custom_id_value = langchain_metadata.get('logger_custom_id', '')
+            # Convert to string, but handle None specially to become empty string
+            logger_custom_id = '' if custom_id_value is None else str(custom_id_value)
+        except (AttributeError, TypeError):
+            logger_custom_id = ''
+        
         payload_data = {
             'error': str(error),
             'error_type': type(error).__name__,
@@ -172,8 +212,10 @@ class ParquetLogger(BaseCallbackHandler):
         entry = {
             'timestamp': datetime.now(timezone.utc),
             'run_id': str(kwargs.get('run_id', '')),
+            'logger_custom_id': logger_custom_id,
             'event_type': 'llm_error',
             'provider': self.provider,
+            'logger_metadata': self.metadata_json,
             'payload': self._safe_json_dumps(payload_data)
         }
         self._add_entry(entry)
@@ -200,13 +242,15 @@ class ParquetLogger(BaseCallbackHandler):
             ts = pa.array([e["timestamp"] for e in self.buffer],
                           type=pa.timestamp("us", tz="UTC"))
             run_id = pa.array([e["run_id"] for e in self.buffer], type=pa.string())
+            logger_custom_id = pa.array([e["logger_custom_id"] for e in self.buffer], type=pa.string())
             event_type = pa.array([e["event_type"] for e in self.buffer], type=pa.string())
             provider = pa.array([e["provider"] for e in self.buffer], type=pa.string())
+            logger_metadata = pa.array([e["logger_metadata"] for e in self.buffer], type=pa.string())
             payload = pa.array([e["payload"] for e in self.buffer], type=pa.string())
             
             # Create table with explicit schema
             table = pa.Table.from_arrays(
-                [ts, run_id, event_type, provider, payload],
+                [ts, run_id, logger_custom_id, event_type, provider, logger_metadata, payload],
                 schema=SCHEMA
             )
             
