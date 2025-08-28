@@ -84,7 +84,10 @@ async def main():
                     },
                 ],
                 # Add custom ID for tracking individual requests in the batch
-                metadata={"logger_custom_id": f"weather-batch-{city.lower().replace(' ', '-')}"}
+                # Pass metadata through config to avoid parameter conflicts
+                config={
+                    "metadata": {"logger_custom_id": f"weather-batch-{city.lower().replace(' ', '-')}"}
+                }
             )
             await progress.update()  # Update progress after each completion
             return result
