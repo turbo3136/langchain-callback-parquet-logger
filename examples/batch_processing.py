@@ -5,17 +5,32 @@ This example shows how to use web search to get weather data and return it in a 
 
 import asyncio
 from typing import Any, Dict, Optional
-from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
 from langchain_core.runnables import RunnableLambda
 from langchain_callback_parquet_logger import ParquetLogger
 
-# Load environment variables (for OPENAI_API_KEY)
-load_dotenv()
+
+# ---------- 1) Progress tracking utility for batch operations ----------
+class AsyncProgress:
+    """Simple async-safe progress tracker for batch operations."""
+    
+    def __init__(self, total: int, desc: str = "Processing"):
+        self.total = total
+        self.completed = 0
+        self.desc = desc
+        self._lock = asyncio.Lock()
+    
+    async def update(self):
+        """Update progress display."""
+        async with self._lock:
+            self.completed += 1
+            percent = (self.completed * 100) // self.total
+            print(f"\r{self.desc}: {self.completed}/{self.total} ({percent}%) completed", 
+                  end="" if self.completed < self.total else "\n", flush=True)
 
 
-# ---------- 1) Define structured output schema for weather data ----------
+# ---------- 2) Define structured output schema for weather data ----------
 class WeatherData(BaseModel):
     """Structured weather information from web search."""
     location: str = Field(description="The city/location for the weather report")
@@ -25,10 +40,14 @@ class WeatherData(BaseModel):
     summary: str = Field(description="Brief weather summary for the day")
 
 
-# ---------- 2) Main async function ----------
+# ---------- 3) Main async function ----------
 async def main():
-    # Create logger that saves to Parquet files
-    with ParquetLogger(log_dir="./llm_batch_logs", buffer_size=50) as logger:
+    # Create logger that saves to Parquet files with all parameters explicitly shown
+    with ParquetLogger(
+        log_dir="./llm_batch_logs",  # Directory to save parquet files
+        buffer_size=50,               # Flush to disk after 50 log entries
+        provider="openai"             # LLM provider name for tracking
+    ) as logger:
         
         # Initialize the LLM with Responses API
         llm = ChatOpenAI(
@@ -42,11 +61,14 @@ async def main():
         # Apply structured output to the LLM
         structured_llm = llm.with_structured_output(WeatherData)
         
-        # Define function that processes each row
-        async def process_row(row: Dict[str, Any]) -> WeatherData:
-            """Process a single input using web search."""
+        # Create progress tracker for batch operations
+        progress = AsyncProgress(total=5, desc="🔍 Fetching weather data")
+        
+        # Define function that processes each row with progress tracking
+        async def process_row_with_progress(row: Dict[str, Any]) -> WeatherData:
+            """Process a single input using web search and update progress."""
             # Pass web search tool directly - warning is harmless
-            return await structured_llm.ainvoke(
+            result = await structured_llm.ainvoke(
                 input=row.get("input"),
                 tools=[
                     {
@@ -55,21 +77,23 @@ async def main():
                     },
                 ],
             )
+            await progress.update()  # Update progress after each completion
+            return result
         
         # Create RunnableLambda wrapper for batch processing
-        runner = RunnableLambda(process_row)
+        runner = RunnableLambda(process_row_with_progress)
         
         # Example weather queries for different cities
         rows = [
             {"input": "What is today's weather in New York City? Use the structured output requested."},
             {"input": "What is today's weather in Los Angeles? Use the structured output requested."},
-            # {"input": "What is today's weather in Chicago? Use the structured output requested."},
-            # {"input": "What is today's weather in Miami? Use the structured output requested."},
-            # {"input": "What is today's weather in Seattle? Use the structured output requested."},
+            {"input": "What is today's weather in Chicago? Use the structured output requested."},
+            {"input": "What is today's weather in Miami? Use the structured output requested."},
+            {"input": "What is today's weather in Seattle? Use the structured output requested."},
         ]
         
         # Process all rows concurrently with max_concurrency in config
-        print("🔍 Fetching weather data using web search...\n")
+        # Progress will be shown as: "🔍 Fetching weather data: 3/5 (60%) completed"
         results = await runner.abatch(
             rows,
             config={"max_concurrency": 3},  # Limit concurrent requests
@@ -77,7 +101,7 @@ async def main():
         )
         
         # Display structured results
-        print("=" * 80)
+        print("\n" + "=" * 80)
         print("WEATHER REPORT RESULTS")
         print("=" * 80)
         
