@@ -2,7 +2,7 @@
 from .logger import ParquetLogger
 from typing import Optional, Dict, Any, List
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 def with_tags(*additional_tags: str, custom_id: Optional[str] = None,
@@ -68,4 +68,18 @@ def with_tags(*additional_tags: str, custom_id: Optional[str] = None,
     return config
 
 
+# Import batch processing helper
+try:
+    from .batch_helpers import batch_run
+    _batch_helpers_available = True
+except ImportError:
+    # Batch helper is optional
+    _batch_helpers_available = False
+    batch_run = None
+
+# Define exports
 __all__ = ['ParquetLogger', 'with_tags', '__version__']
+
+# Add batch helper to exports if available
+if _batch_helpers_available:
+    __all__.append('batch_run')

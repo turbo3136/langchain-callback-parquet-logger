@@ -278,6 +278,48 @@ import langchain_callback_parquet_logger
 print(langchain_callback_parquet_logger.__version__)
 ```
 
+## Batch Processing (New in v0.3.0)
+
+Minimal helper for batch processing DataFrames through LLMs:
+
+### Quick Start
+
+```python
+import pandas as pd
+from langchain_openai import ChatOpenAI
+from langchain_callback_parquet_logger import batch_run, with_tags
+
+# Prepare your DataFrame
+df = pd.DataFrame({
+    'id': [1, 2, 3],
+    'question': ['What is AI?', 'Explain quantum computing', 'What is blockchain?']
+})
+
+# Add columns for LLM processing
+df['prompt'] = df['question']  # Your prompts
+df['config'] = df['id'].apply(lambda x: with_tags(custom_id=str(x)))  # Optional: custom IDs
+
+# Configure LLM (with any features you need)
+llm = ChatOpenAI(
+    model="gpt-4o-mini",
+    service_tier="flex",  # Optional: use flex tier
+    model_kwargs={"background": True}  # Optional: background processing
+)
+
+# Run batch processing
+results = await batch_run(df, llm, max_concurrency=10, show_progress=True)
+df['answer'] = results
+```
+
+### Features
+
+- **Minimal**: ~50 lines of code, does one thing well
+- **Flexible**: You control everything via DataFrame columns
+- **Progress**: Auto-detects notebook vs terminal for progress display
+- **Simple**: Just handles async batching - no hidden magic
+
+See [examples/batch_processing.py](examples/batch_processing.py) for advanced usage with structured outputs, logging, and more.
+
 ## Context Manager Usage
 
 ```python
