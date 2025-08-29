@@ -1,145 +1,151 @@
 """
-Simple batch processing example using OpenAI Responses API with web search and structured output.
-This example shows how to use web search to get weather data and return it in a structured format.
+Batch processing example using the minimal batch_run helper with all advanced features.
+Shows service_tier="flex", model_kwargs, structured output, and comprehensive logging.
 """
 
 import asyncio
-from typing import Any, Dict, Optional
+import pandas as pd
+from typing import Optional
+from datetime import date
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
-from langchain_core.runnables import RunnableLambda
-from langchain_callback_parquet_logger import ParquetLogger, with_tags
+from langchain_callback_parquet_logger import ParquetLogger, with_tags, batch_run
 
 
-# ---------- 1) Progress tracking utility for batch operations ----------
-class AsyncProgress:
-    """Simple async-safe progress tracker for batch operations."""
-    
-    def __init__(self, total: int, desc: str = "Processing"):
-        self.total = total
-        self.completed = 0
-        self.desc = desc
-        self._lock = asyncio.Lock()
-    
-    async def update(self):
-        """Update progress display."""
-        async with self._lock:
-            self.completed += 1
-            percent = (self.completed * 100) // self.total
-            print(f"\r{self.desc}: {self.completed}/{self.total} ({percent}%) completed", 
-                  end="" if self.completed < self.total else "\n", flush=True)
-
-
-# ---------- 2) Define structured output schema for weather data ----------
+# Define structured output schema for weather data
 class WeatherData(BaseModel):
     """Structured weather information from web search."""
     location: str = Field(description="The city/location for the weather report")
-    temperature: Optional[float] = Field(description="Temperature in Fahrenheit for today", default=None)
-    cloud_cover: Optional[str] = Field(description="Description of cloud cover (e.g., clear, partly cloudy, overcast)", default=None)
-    precipitation_probability: Optional[float] = Field(description="Probability of precipitation as percentage (0-100)", default=None)
-    summary: str = Field(description="Brief weather summary for the day")
+    temperature: Optional[float] = Field(description="Temperature in Fahrenheit", default=None)
+    conditions: Optional[str] = Field(description="Weather conditions", default=None)
+    summary: str = Field(description="Brief weather summary")
 
 
-# ---------- 3) Main async function ----------
 async def main():
-    # Create logger that saves to Parquet files with all parameters explicitly shown
-    with ParquetLogger(
-        log_dir="./llm_batch_logs",  # Directory to save parquet files
-        buffer_size=50,               # Flush to disk after 50 log entries
-        provider="openai",            # LLM provider name for tracking
-        logger_metadata={             # Optional: logger-level metadata for all logs
-            "batch_type": "weather",
-            "api_version": "v1"
+    """Demonstrate batch processing with all advanced features."""
+    
+    # Create sample DataFrame
+    df = pd.DataFrame({
+        'city_id': ['NYC-001', 'LA-002', 'CHI-003', 'MIA-004', 'SEA-005'],
+        'city': ['New York', 'Los Angeles', 'Chicago', 'Miami', 'Seattle'],
+        'state': ['NY', 'CA', 'IL', 'FL', 'WA'],
+    })
+    
+    print("📊 Processing weather data for cities:")
+    print(df[['city_id', 'city', 'state']].to_string())
+    print("\n" + "="*60 + "\n")
+    
+    # Step 1: Prepare DataFrame columns
+    # Create prompts
+    df['prompt'] = df.apply(
+        lambda r: f"What is today's weather in {r['city']}, {r['state']}? "
+                  f"Provide temperature and conditions.",
+        axis=1
+    )
+    
+    # Create config with custom IDs and tags
+    df['config'] = df.apply(
+        lambda r: with_tags(
+            custom_id=r['city_id'],
+            tags=['weather-batch', 'flex-tier', f"state-{r['state']}"]
+        ),
+        axis=1
+    )
+    
+    # Add web search tool to all rows
+    df['tools'] = [[{
+        "type": "web_search",
+        "search_context_size": "low"
+    }]] * len(df)
+    
+    # Step 2: Setup logger with comprehensive metadata
+    logger_config = {
+        "log_dir": "./batch_logs",
+        "buffer_size": 50,
+        "provider": "openai",
+        "partition_on": "date",
+        "logger_metadata": {
+            "batch_type": "weather_forecast",
+            "service_tier": "flex",
+            "background_processing": True,
+            "api_version": "v2",
+            "environment": "production",
+            "team": "data-ops",
+            "cost_center": "research",
         }
-    ) as logger:
-        
-        # Initialize the LLM with Responses API
+    }
+    
+    # Step 3: Configure LLM with all advanced features
+    with ParquetLogger(**logger_config) as logger:
+        # Initialize LLM with service_tier and model_kwargs
         llm = ChatOpenAI(
-            model="gpt-5-nano",  # Use a model that supports web search
-            reasoning={"effort": "low"},  # low reasoning for testing
-            use_responses_api=True,        # Use Responses API for web search support
-            output_version="responses/v1", # Updated message shape for Responses API
-            callbacks=[logger],             # Attach logger to track all interactions
+            model="gpt-4o-mini",
+            service_tier="flex",  # Using flex tier for cost optimization
+            model_kwargs={
+                "background": True,  # Background processing
+                "prompt_cache_key": "weather-batch-v1",  # Cache key for prompt reuse
+            },
+            callbacks=[logger],  # Attach logger
+            temperature=0,  # Consistent results
         )
         
-        # Apply structured output to the LLM
+        # Apply structured output
         structured_llm = llm.with_structured_output(WeatherData)
         
-        # Create progress tracker for batch operations
-        progress = AsyncProgress(total=5, desc="🔍 Fetching weather data")
+        # Step 4: Run batch processing with minimal helper
+        print("🚀 Starting batch processing with flex tier...\n")
         
-        # Define function that processes each row with progress tracking
-        async def process_row_with_progress(row: Dict[str, Any]) -> WeatherData:
-            """Process a single input using web search and update progress."""
-            # Extract city name for custom ID (simple parsing)
-            city = row.get("input", "").split(" in ")[-1].split("?")[0].strip() if " in " in row.get("input", "") else "unknown"
-            
-            # Pass web search tool directly - warning is harmless
-            result = await structured_llm.ainvoke(
-                input=row.get("input"),
-                tools=[
-                    {
-                        "type": "web_search",
-                        "search_context_size": "low",
-                    },
-                ],
-                # Add custom ID for tracking individual requests in the batch
-                # Also add tags to categorize this as a batch weather query
-                config=with_tags(
-                    custom_id=f"weather-batch-{city.lower().replace(' ', '-')}",
-                    tags=["batch-processing", "weather-api", "structured-output"]
-                )
-            )
-            await progress.update()  # Update progress after each completion
-            return result
-        
-        # Create RunnableLambda wrapper for batch processing
-        runner = RunnableLambda(process_row_with_progress)
-        
-        # Example weather queries for different cities
-        rows = [
-            {"input": "What is today's weather in New York City? Use the structured output requested."},
-            {"input": "What is today's weather in Los Angeles? Use the structured output requested."},
-            {"input": "What is today's weather in Chicago? Use the structured output requested."},
-            {"input": "What is today's weather in Miami? Use the structured output requested."},
-            {"input": "What is today's weather in Seattle? Use the structured output requested."},
-        ]
-        
-        # Process all rows concurrently with max_concurrency in config
-        # Progress will be shown as: "🔍 Fetching weather data: 3/5 (60%) completed"
-        results = await runner.abatch(
-            rows,
-            config={"max_concurrency": 3},  # Limit concurrent requests
-            return_exceptions=True,         # Return exceptions instead of raising
+        results = await batch_run(
+            df=df,
+            llm=structured_llm,
+            prompt_col='prompt',
+            config_col='config',
+            tools_col='tools',
+            max_concurrency=3,  # Process 3 at a time
+            show_progress=True,  # Show progress bar
+            return_exceptions=True  # Don't fail whole batch on errors
         )
         
-        # Display structured results
-        print("\n" + "=" * 80)
-        print("WEATHER REPORT RESULTS")
-        print("=" * 80)
+        # Step 5: Add results to DataFrame
+        df['result'] = results
         
-        for i, result in enumerate(results, 1):
+        # Step 6: Display results
+        print("\n" + "="*60)
+        print("WEATHER RESULTS")
+        print("="*60 + "\n")
+        
+        for idx, row in df.iterrows():
+            print(f"📍 {row['city']}, {row['state']} (ID: {row['city_id']})")
+            
+            result = row['result']
             if isinstance(result, Exception):
-                print(f"\n❌ Query {i} Error: {result}")
+                print(f"   ❌ Error: {result}")
             else:
-                print(f"\n📍 {result.location}")
-                print(f"   🌡️  Temperature: {result.temperature}°F" if result.temperature else "   🌡️  Temperature: N/A")
-                print(f"   ☁️  Cloud Cover: {result.cloud_cover}" if result.cloud_cover else "   ☁️  Cloud Cover: N/A")
-                print(f"   💧 Precipitation: {result.precipitation_probability}%" if result.precipitation_probability else "   💧 Precipitation: N/A")
+                print(f"   🌡️  Temperature: {result.temperature}°F")
+                print(f"   ☁️  Conditions: {result.conditions}")
                 print(f"   📝 Summary: {result.summary}")
+            print()
         
-        print("\n" + "=" * 80)
-        print(f"✅ Processed {len(results)} weather queries")
-        print(f"📁 Logs saved to: ./llm_batch_logs/")
-        print("=" * 80)
+        # Step 7: Save results to CSV
+        df['temperature'] = df['result'].apply(
+            lambda x: x.temperature if not isinstance(x, Exception) else None
+        )
+        df['conditions'] = df['result'].apply(
+            lambda x: x.conditions if not isinstance(x, Exception) else None
+        )
         
-        # Note: The logs now include:
-        # - logger_custom_id: Unique ID for each city request (e.g., "weather-batch-new-york-city")
-        #   passed via tags so it persists through all callback events (start, end, error)
-        # - logger_metadata: Batch-level metadata (batch_type="weather", api_version="v1")
-        # You can query these fields when analyzing the parquet files
+        output_df = df[['city_id', 'city', 'state', 'temperature', 'conditions']]
+        output_df.to_csv('weather_results.csv', index=False)
+        print(f"💾 Results saved to weather_results.csv")
+        
+        # Show where logs are saved
+        today = date.today()
+        print(f"📁 Logs saved to: {logger_config['log_dir']}/date={today}/")
+        print("\n" + "="*60)
+        print("✅ Batch processing complete!")
+        print("="*60)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
-    # if you're running this in a notebook, you should probably just use this:
-    # await main()  # should work because notebooks already use an asyncio event loop
+    # For notebooks use: await main()
