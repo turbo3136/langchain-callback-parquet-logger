@@ -21,7 +21,8 @@ async def batch_run(
     max_concurrency: int = 10,
     show_progress: bool = True,
     return_exceptions: bool = True,
-) -> list:
+    return_results: bool = True,
+) -> Optional[list]:
     """
     Minimal batch runner for DataFrames with LLMs.
     
@@ -36,19 +37,21 @@ async def batch_run(
         max_concurrency: Maximum concurrent requests
         show_progress: Show progress bar (auto-detects notebook vs terminal)
         return_exceptions: Return exceptions instead of raising
+        return_results: If False, don't keep results in memory (useful for huge DataFrames)
         
     Returns:
-        List of results in same order as DataFrame rows
+        List of results in same order as DataFrame rows, or None if return_results=False
         
     Example:
-        >>> # Prepare your data
-        >>> df['prompt'] = df.apply(lambda r: f"Classify {r['name']}", axis=1)
-        >>> df['config'] = df.apply(lambda r: with_tags(custom_id=str(r['id'])), axis=1)
-        >>> df['tools'] = [[{"type": "web_search"}]] * len(df)
-        >>> 
-        >>> # Run batch
+        >>> # Normal usage - keep results
         >>> results = await batch_run(df, llm, max_concurrency=100)
         >>> df['result'] = results
+        >>> 
+        >>> # Memory-efficient for huge DataFrames (results only in ParquetLogger)
+        >>> with ParquetLogger('./logs') as logger:
+        >>>     llm.callbacks = [logger]
+        >>>     await batch_run(huge_df, llm, return_results=False)
+        >>>     # Results are in parquet files, not memory
     """
     rows = df.to_dict('records')
     
@@ -98,13 +101,29 @@ async def batch_run(
     
     # Create runner and process batch
     runner = RunnableLambda(process_row)
-    results = await runner.abatch(
-        rows,
-        config={"max_concurrency": max_concurrency},
-        return_exceptions=return_exceptions
-    )
     
-    if progress_bar:
-        progress_bar.close()
-    
-    return results
+    if return_results:
+        # Normal mode: collect and return results
+        results = await runner.abatch(
+            rows,
+            config={"max_concurrency": max_concurrency},
+            return_exceptions=return_exceptions
+        )
+        
+        if progress_bar:
+            progress_bar.close()
+        
+        return results
+    else:
+        # Memory-efficient mode: don't collect results
+        # Process all rows but discard results (they're in ParquetLogger)
+        await runner.abatch(
+            rows,
+            config={"max_concurrency": max_concurrency},
+            return_exceptions=return_exceptions
+        )
+        
+        if progress_bar:
+            progress_bar.close()
+        
+        return None

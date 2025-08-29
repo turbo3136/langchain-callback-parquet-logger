@@ -1,16 +1,15 @@
 # LangChain Callback Parquet Logger
 
-A high-performance callback handler for logging LangChain LLM interactions to Parquet files. This package provides efficient, structured logging with automatic partitioning and buffering for production use.
+A high-performance callback handler for logging LangChain LLM interactions to Parquet files with automatic partitioning, buffering, and batch processing support.
 
 ## Features
 
 - 📊 **Parquet Format**: Efficient columnar storage for analytics
 - 🚀 **Buffered Writing**: Configurable buffer size for optimal performance
-- 📅 **Daily Partitioning**: Automatic date-based file organization
-- 🔄 **Thread-Safe**: Safe for concurrent LLM calls
-- 📦 **Flexible Schema**: JSON payload for extensible logging
-- 🔒 **Automatic Cleanup**: Ensures buffers flush on exit
+- 📅 **Partitioning**: Optional daily partitioning for better organization
 - 🏷️ **Custom Tracking**: Add custom IDs and metadata to your logs
+- 🔄 **Batch Processing**: Simple helper for DataFrame batch operations
+- 🔒 **Thread-Safe**: Safe for concurrent LLM calls
 
 ## Installation
 
@@ -24,201 +23,31 @@ pip install langchain-callback-parquet-logger
 from langchain_callback_parquet_logger import ParquetLogger
 from langchain_openai import ChatOpenAI
 
-# Just add the logger - works with ANY LangChain LLM
-llm = ChatOpenAI(model="gpt-4")
+# Simple usage
+llm = ChatOpenAI(model="gpt-4o-mini")
 llm.callbacks = [ParquetLogger("./logs")]
 
-# Use the LLM normally
 response = llm.invoke("What is 2+2?")
 ```
 
-## Usage in Notebooks (Jupyter, Hex, Colab)
+## Core Features
 
-⚠️ **Important**: In notebook environments, the default buffer size of 100 means logs only write to disk after 100 LLM calls. For immediate writes, use one of these approaches:
+### 1. Basic Logging
 
-### Option 1: Context Manager (Recommended)
 ```python
-from langchain_callback_parquet_logger import ParquetLogger
-from langchain_openai import ChatOpenAI
-
-# Using context manager ensures logs are written when the block exits
+# With context manager (recommended for notebooks)
 with ParquetLogger('./logs') as logger:
-    llm = ChatOpenAI(model="gpt-4")
-    llm.callbacks = [logger]
-    response = llm.invoke("What is 2+2?")
-# Logs are automatically flushed here
+    llm = ChatOpenAI(model="gpt-4o-mini", callbacks=[logger])
+    response = llm.invoke("Hello!")
+# Logs automatically flushed on exit
 ```
 
-### Option 2: Small Buffer Size
-```python
-# Set buffer_size=1 to write after every LLM call
-logger = ParquetLogger('./logs', buffer_size=1)
-llm = ChatOpenAI(model="gpt-4", callbacks=[logger])
-response = llm.invoke("What is 2+2?")
-```
-
-### Option 3: Manual Flush
-```python
-logger = ParquetLogger('./logs')
-llm = ChatOpenAI(model="gpt-4", callbacks=[logger])
-response = llm.invoke("What is 2+2?")
-logger.flush()  # Manually write logs to disk
-```
-
-## Configuration
-
-### Parameters
-
-- `log_dir` (str, default: "./llm_logs"): Directory for log files
-- `buffer_size` (int, default: 100): Number of entries before auto-flush
-- `provider` (str, default: "openai"): LLM provider name for tracking
-- `logger_metadata` (dict, optional): Logger-level metadata included in all log entries
-- `partition_on` (str or None, default: "date"): Partitioning strategy - "date" for daily partitions or None for no partitioning
-
-### Log Structure
-
-Logs are saved as Parquet files with the following schema:
-
-| Column | Type | Description |
-|--------|------|-------------|
-| timestamp | timestamp[us, tz=UTC] | Event timestamp |
-| run_id | string | Unique run identifier |
-| logger_custom_id | string | Optional custom ID for request tracking |
-| event_type | string | Event type (llm_start, llm_end, llm_error) |
-| provider | string | LLM provider name |
-| logger_metadata | string | JSON-encoded logger-level metadata |
-| payload | string | JSON-encoded event data |
-
-### File Organization
-
-#### With Date Partitioning (default):
-```
-llm_logs/
-├── date=2024-01-15/
-│   ├── logs_143022_123456.parquet
-│   └── logs_150331_789012.parquet
-└── date=2024-01-16/
-    └── logs_090122_345678.parquet
-```
-
-#### Without Partitioning:
-```
-llm_logs/
-├── logs_143022_123456.parquet
-├── logs_150331_789012.parquet
-└── logs_090122_345678.parquet
-```
-
-## Reading Logs
-
-### With Pandas
+### 2. Custom IDs and Metadata
 
 ```python
-import pandas as pd
-import json
+from langchain_callback_parquet_logger import ParquetLogger, with_tags
 
-# Read all parquet files in the log directory
-df = pd.read_parquet("./logs")
-
-# Parse JSON payloads
-df['data'] = df['payload'].apply(json.loads)
-
-# Analyze completions
-completions = df[df['event_type'] == 'llm_end']
-for _, row in completions.iterrows():
-    data = row['data']
-    if 'usage' in data:
-        print(f"Run {row['run_id'][:8]}: {data['usage'].get('total_tokens', 0)} tokens")
-
-# Get error rate
-error_rate = len(df[df['event_type'] == 'llm_error']) / len(df) * 100
-print(f"Error rate: {error_rate:.2f}%")
-```
-
-### With DuckDB
-
-```python
-import duckdb
-import json
-
-# Connect to DuckDB and query parquet files directly
-conn = duckdb.connect()
-
-# Read all logs
-df = conn.execute("""
-    SELECT * FROM read_parquet('./logs/**/*.parquet')
-    ORDER BY timestamp DESC
-""").df()
-
-# Analyze by provider and event type
-summary = conn.execute("""
-    SELECT 
-        provider,
-        event_type,
-        COUNT(*) as count,
-        DATE(timestamp) as date
-    FROM read_parquet('./logs/**/*.parquet')
-    GROUP BY provider, event_type, DATE(timestamp)
-    ORDER BY date DESC, provider
-""").df()
-
-print(summary)
-
-# Query using the custom ID field to track requests across events
-custom_requests = conn.execute("""
-    SELECT 
-        logger_custom_id,
-        event_type,
-        timestamp,
-        json_extract_string(payload, '$.usage.total_tokens') as tokens
-    FROM read_parquet('./logs/**/*.parquet')
-    WHERE logger_custom_id != ''
-    ORDER BY logger_custom_id, timestamp
-""").df()
-
-print(f"Found {len(custom_requests)} requests with custom IDs")
-
-# Extract specific fields from JSON payload
-detailed = conn.execute("""
-    SELECT 
-        timestamp,
-        run_id,
-        json_extract_string(payload, '$.model') as model,
-        json_extract_string(payload, '$.usage.total_tokens') as tokens
-    FROM read_parquet('./logs/**/*.parquet')
-    WHERE event_type = 'llm_end'
-""").df()
-
-print(f"Total tokens used: {detailed['tokens'].astype(float).sum()}")
-```
-
-### With PyArrow
-
-```python
-import pyarrow.parquet as pq
-import pyarrow.dataset as ds
-import json
-
-# Read using dataset API for better performance with partitioned data
-dataset = ds.dataset("./logs", format="parquet", partitioning="hive")
-
-# Convert to table with filters
-table = dataset.to_table(filter=(ds.field("event_type") == "llm_end"))
-df = table.to_pandas()
-
-# Parse and analyze
-for _, row in df.iterrows():
-    payload = json.loads(row['payload'])
-    print(f"Model: {payload.get('model_name', 'unknown')}")
-    print(f"Tokens: {payload.get('usage', {}).get('total_tokens', 0)}")
-```
-
-## Metadata and Custom IDs
-
-### Logger-Level Metadata
-Add metadata that's included with every log entry:
-
-```python
+# Logger-level metadata (included in all logs)
 logger = ParquetLogger(
     log_dir="./logs",
     logger_metadata={
@@ -227,204 +56,171 @@ logger = ParquetLogger(
         "version": "2.1.0"
     }
 )
+
+# Request-level tracking with custom IDs
+llm = ChatOpenAI(model="gpt-4o-mini", callbacks=[logger])
+response = llm.invoke(
+    "What is quantum computing?",
+    config=with_tags(
+        custom_id="user-123-req-456",
+        tags=["production", "high-priority"]
+    )
+)
 ```
 
-### Request-Level Tracking with Tags
+### 3. Batch Processing (v0.3.0+)
 
-The `with_tags` helper provides flexible request tracking with custom IDs and tags that persist through all callback events:
-
-```python
-from langchain_callback_parquet_logger import with_tags
-
-# Simple custom ID
-response = llm.invoke(
-    "What is quantum computing?",
-    config=with_tags(custom_id="user-123-session-456-req-789")
-)
-
-# Custom ID with additional tags (positional)
-response = llm.invoke(
-    "What is quantum computing?",
-    config=with_tags("production", "high-priority", custom_id="req-789")
-)
-
-# Multiple tags without custom ID
-response = llm.invoke(
-    "What is quantum computing?",
-    config=with_tags("experimental", "gpt-4", "complex-query")
-)
-
-# Extend existing config
-existing = {"tags": ["baseline"], "metadata": {"user": "john"}}
-response = llm.invoke(
-    "What is quantum computing?",
-    config=with_tags("urgent", custom_id="req-999", config=existing)
-)
-# Result: tags = ["baseline", "urgent", "logger_custom_id:req-999"]
-
-# Replace existing tags instead of extending
-response = llm.invoke(
-    "What is quantum computing?",
-    config=with_tags("new-tag", custom_id="req-777", config=existing, replace_tags=True)
-)
-# Result: tags = ["new-tag", "logger_custom_id:req-777"] (baseline replaced)
-```
-
-**Note**: We use tags instead of metadata because LangChain tags persist through all callback events (on_llm_start, on_llm_end, on_llm_error), while metadata only reaches the start event.
-
-### Checking Version
-```python
-import langchain_callback_parquet_logger
-print(langchain_callback_parquet_logger.__version__)
-```
-
-## Batch Processing (New in v0.3.0)
-
-Minimal helper for batch processing DataFrames through LLMs:
-
-### Quick Start
+Process DataFrames through LLMs with minimal code:
 
 ```python
 import pandas as pd
-from langchain_openai import ChatOpenAI
-from langchain_callback_parquet_logger import batch_run, with_tags
+from langchain_callback_parquet_logger import batch_run, with_tags, ParquetLogger
 
-# Prepare your DataFrame
+# Prepare your data
 df = pd.DataFrame({
-    'id': [1, 2, 3],
+    'id': ['001', '002', '003'],
     'question': ['What is AI?', 'Explain quantum computing', 'What is blockchain?']
 })
 
-# Add columns for LLM processing
-df['prompt'] = df['question']  # Your prompts
-df['config'] = df['id'].apply(lambda x: with_tags(custom_id=str(x)))  # Optional: custom IDs
+# Add required columns
+df['prompt'] = df['question']
+df['config'] = df['id'].apply(lambda x: with_tags(custom_id=x))
 
-# Configure LLM (with any features you need)
-llm = ChatOpenAI(
-    model="gpt-4o-mini",
-    service_tier="flex",  # Optional: use flex tier
-    model_kwargs={"background": True}  # Optional: background processing
-)
-
-# Run batch processing
-results = await batch_run(df, llm, max_concurrency=10, show_progress=True)
-df['answer'] = results
+# Configure LLM with advanced features
+with ParquetLogger('./logs') as logger:
+    llm = ChatOpenAI(
+        model="gpt-4o-mini",
+        service_tier="flex",  # Optional: optimize costs
+        model_kwargs={"background": True},  # Optional: background processing
+        callbacks=[logger]
+    )
+    
+    # Run batch processing
+    results = await batch_run(df, llm, max_concurrency=10, show_progress=True)
+    df['answer'] = results
 ```
 
-### Features
+See [examples/batch_processing.py](examples/batch_processing.py) for advanced usage with structured outputs, web search tools, and more.
 
-- **Minimal**: ~50 lines of code, does one thing well
-- **Flexible**: You control everything via DataFrame columns
-- **Progress**: Auto-detects notebook vs terminal for progress display
-- **Simple**: Just handles async batching - no hidden magic
+#### Memory-Efficient Mode for Huge DataFrames
 
-See [examples/batch_processing.py](examples/batch_processing.py) for advanced usage with structured outputs, logging, and more.
-
-## Context Manager Usage
+For massive DataFrames, use `return_results=False` to avoid keeping results in memory:
 
 ```python
-with ParquetLogger(log_dir="./logs") as logger:
-    llm = ChatOpenAI(callbacks=[logger])
-    llm.invoke("Process this message")
-# Buffer automatically flushed on exit
+# Process huge DataFrame without memory overhead
+with ParquetLogger('./logs') as logger:
+    llm = ChatOpenAI(model="gpt-4o-mini", callbacks=[logger])
+    
+    # Results saved to parquet only, not kept in memory
+    await batch_run(huge_df, llm, return_results=False)
+    
+# Read results later from parquet files
+df_logs = pd.read_parquet('./logs')
+results = df_logs[df_logs['event_type'] == 'llm_end']
 ```
 
-## Advanced Usage
+## Configuration Options
 
-### Partitioning Options
+### ParquetLogger Parameters
 
-Control how log files are organized:
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `log_dir` | str | "./llm_logs" | Directory for log files |
+| `buffer_size` | int | 100 | Entries before auto-flush |
+| `provider` | str | "openai" | LLM provider name |
+| `logger_metadata` | dict | {} | Metadata for all logs |
+| `partition_on` | str/None | "date" | "date" or None for no partitioning |
 
+### batch_run Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `df` | DataFrame | required | DataFrame with data |
+| `llm` | LangChain LLM | required | Configured LLM instance |
+| `prompt_col` | str | "prompt" | Column with prompts |
+| `config_col` | str | "config" | Column with config dicts |
+| `tools_col` | str/None | "tools" | Column with tools lists |
+| `max_concurrency` | int | 10 | Max parallel requests |
+| `show_progress` | bool | True | Show progress bar |
+| `return_results` | bool | True | If False, don't keep results in memory |
+
+## Reading Logs
+
+### With Pandas
 ```python
-# Default: Daily date partitioning
-logger = ParquetLogger(
-    log_dir="./logs",
-    partition_on="date"  # Creates date=YYYY-MM-DD subdirectories
-)
+import pandas as pd
+import json
 
-# No partitioning - files saved directly to log_dir
-logger = ParquetLogger(
-    log_dir="./logs",
-    partition_on=None  # All files in ./logs/
-)
+df = pd.read_parquet("./logs")
+df['data'] = df['payload'].apply(json.loads)
 
-# Save to current directory without partitioning
-logger = ParquetLogger(
-    log_dir=".",
-    partition_on=None  # Files saved directly to current directory
-)
+# Analyze by custom ID
+custom_requests = df[df['logger_custom_id'] != '']
+print(f"Found {len(custom_requests)} tagged requests")
 ```
 
-### Custom Buffer Size for Batch Processing
-
+### With DuckDB
 ```python
-# Large buffer for batch processing
-logger = ParquetLogger(
-    log_dir="./batch_logs",
-    buffer_size=1000,  # Flush every 1000 entries
-    provider="anthropic"
-)
+import duckdb
+
+conn = duckdb.connect()
+df = conn.execute("""
+    SELECT 
+        logger_custom_id,
+        event_type,
+        timestamp,
+        json_extract_string(payload, '$.usage.total_tokens') as tokens
+    FROM read_parquet('./logs/**/*.parquet')
+    WHERE logger_custom_id != ''
+    ORDER BY timestamp DESC
+""").df()
 ```
 
-### Multiple Providers
+## Log Schema
 
-```python
-# Track different providers separately
-openai_logger = ParquetLogger(log_dir="./logs", provider="openai")
-anthropic_logger = ParquetLogger(log_dir="./logs", provider="anthropic")
+| Column | Type | Description |
+|--------|------|-------------|
+| `timestamp` | timestamp | Event time (UTC) |
+| `run_id` | string | Unique run ID |
+| `logger_custom_id` | string | Your custom ID |
+| `event_type` | string | llm_start/end/error |
+| `provider` | string | LLM provider |
+| `logger_metadata` | string | JSON metadata |
+| `payload` | string | JSON event data |
 
-openai_llm = ChatOpenAI(callbacks=[openai_logger])
-anthropic_llm = ChatAnthropic(callbacks=[anthropic_logger])
+## Important Notes
+
+### Notebook Usage
+In Jupyter/Colab, use one of these approaches for immediate writes:
+- **Context manager** (recommended): `with ParquetLogger() as logger:`
+- **Small buffer**: `ParquetLogger(buffer_size=1)`
+- **Manual flush**: `logger.flush()`
+
+### File Organization
+```
+logs/
+├── date=2024-01-15/          # With partitioning (default)
+│   └── logs_143022_123456.parquet
+└── date=2024-01-16/
+    └── logs_090122_345678.parquet
 ```
 
 ## Examples
 
-Check out the `examples/` directory for complete working examples:
-
-- [`basic_usage.py`](examples/basic_usage.py) - Simple example showing fundamental logging capabilities
-- [`batch_processing.py`](examples/batch_processing.py) - Advanced example with async batch processing, web search, and structured outputs
-
-Run examples:
-```bash
-# Basic usage
-python examples/basic_usage.py
-
-# Batch processing with web search
-python examples/batch_processing.py
-```
-
-## Performance Considerations
-
-- **Buffer Size**: Larger buffers reduce I/O but use more memory
-- **Compression**: Uses Snappy compression by default for balance of speed/size
-- **Partitioning**: Daily partitions enable efficient querying and cleanup
-- **Thread Safety**: Safe for concurrent use without performance penalty
-
-## Development
-
-### Install from source
-
-```bash
-git clone https://github.com/turbo3136/langchain-callback-parquet-logger.git
-cd langchain-callback-parquet-logger
-pip install -e .
-```
-
-### Running Tests
-
-```bash
-# No tests available yet
-# Contributions welcome!
-```
+- [`basic_usage.py`](examples/basic_usage.py) - Simple logging example
+- [`batch_processing.py`](examples/batch_processing.py) - Advanced batch processing with all features
+- [`simple_batch_example.py`](examples/simple_batch_example.py) - Before/after batch processing comparison
+- [`memory_efficient_batch.py`](examples/memory_efficient_batch.py) - Memory-efficient processing for huge DataFrames
+- [`partitioning_example.py`](examples/partitioning_example.py) - Partitioning strategies
 
 ## License
 
-MIT License - see LICENSE file for details
+MIT License - see LICENSE file
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions welcome! Please submit a Pull Request.
 
 ## Support
 
-For issues and questions, please use the [GitHub issues page](https://github.com/turbo3136/langchain-callback-parquet-logger/issues).
+For issues and questions, use [GitHub issues](https://github.com/turbo3136/langchain-callback-parquet-logger/issues).
