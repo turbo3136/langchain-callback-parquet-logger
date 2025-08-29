@@ -2,7 +2,7 @@
 Basic usage example showing simple logging with the ParquetLogger.
 """
 
-from langchain_callback_parquet_logger import ParquetLogger
+from langchain_callback_parquet_logger import ParquetLogger, with_custom_id
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 
@@ -50,7 +50,7 @@ def main():
             # You can include a logger_custom_id with each request for tracking
             response = llm.invoke(
                 question,
-                metadata={"logger_custom_id": f"question-{i}"}  # Custom ID for this specific request
+                config=with_custom_id(f"question-{i}")  # Custom ID for this specific request
             )
             print(f"Response: {response.content[:200]}...")  # Show first 200 chars
         except Exception as e:

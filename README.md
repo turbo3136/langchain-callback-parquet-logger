@@ -154,15 +154,16 @@ summary = conn.execute("""
 
 print(summary)
 
-# Query using the new custom ID field
+# Query using the custom ID field to track requests across events
 custom_requests = conn.execute("""
     SELECT 
         logger_custom_id,
         event_type,
+        timestamp,
         json_extract_string(payload, '$.usage.total_tokens') as tokens
     FROM read_parquet('./logs/**/*.parquet')
     WHERE logger_custom_id != ''
-    ORDER BY timestamp
+    ORDER BY logger_custom_id, timestamp
 """).df()
 
 print(f"Found {len(custom_requests)} requests with custom IDs")
@@ -219,14 +220,25 @@ logger = ParquetLogger(
 ```
 
 ### Request-Level Custom IDs
-Track specific requests with custom IDs:
+Track specific requests with custom IDs that persist through all callback events:
 
 ```python
+from langchain_callback_parquet_logger import with_custom_id
+
+# Using the helper function (recommended)
 response = llm.invoke(
     "What is quantum computing?",
-    metadata={"logger_custom_id": "user-123-session-456-req-789"}
+    config=with_custom_id("user-123-session-456-req-789")
+)
+
+# Or using tags directly
+response = llm.invoke(
+    "What is quantum computing?",
+    tags=["logger_custom_id:user-123-session-456-req-789"]
 )
 ```
+
+**Note**: We use tags instead of metadata because LangChain tags persist through all callback events (on_llm_start, on_llm_end, on_llm_error), while metadata only reaches the start event.
 
 ### Checking Version
 ```python

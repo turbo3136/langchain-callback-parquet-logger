@@ -84,6 +84,14 @@ class ParquetLogger(BaseCallbackHandler):
             pass
         return False
     
+    def _extract_custom_id_from_tags(self, kwargs: Dict[str, Any]) -> str:
+        """Extract logger_custom_id from tags."""
+        tags = kwargs.get('tags', []) or []
+        for tag in tags:
+            if isinstance(tag, str) and tag.startswith('logger_custom_id:'):
+                return tag.split(':', 1)[1]  # Everything after first colon
+        return ''
+    
     def _safe_json_dumps(self, obj: Any) -> str:
         """Convert object to JSON string, handling UUIDs and other non-serializable types."""
         def default(o):
@@ -96,14 +104,8 @@ class ParquetLogger(BaseCallbackHandler):
     
     def on_llm_start(self, serialized: Dict, prompts: List[str], **kwargs):
         """Log LLM start event with all request data in payload."""
-        # Safely extract logger_custom_id from LangChain metadata
-        try:
-            langchain_metadata = kwargs.get('metadata', {}) or {}
-            custom_id_value = langchain_metadata.get('logger_custom_id', '')
-            # Convert to string, but handle None specially to become empty string
-            logger_custom_id = '' if custom_id_value is None else str(custom_id_value)
-        except (AttributeError, TypeError):
-            logger_custom_id = ''
+        # Extract logger_custom_id from tags (persists through all events)
+        logger_custom_id = self._extract_custom_id_from_tags(kwargs)
         
         payload_data = {
             'model': serialized.get('kwargs', {}).get('model_name', 'unknown'),
@@ -130,14 +132,8 @@ class ParquetLogger(BaseCallbackHandler):
     
     def on_llm_end(self, response, **kwargs):
         """Log LLM completion event with all response data in payload."""
-        # Safely extract logger_custom_id from LangChain metadata
-        try:
-            langchain_metadata = kwargs.get('metadata', {}) or {}
-            custom_id_value = langchain_metadata.get('logger_custom_id', '')
-            # Convert to string, but handle None specially to become empty string
-            logger_custom_id = '' if custom_id_value is None else str(custom_id_value)
-        except (AttributeError, TypeError):
-            logger_custom_id = ''
+        # Extract logger_custom_id from tags (persists through all events)
+        logger_custom_id = self._extract_custom_id_from_tags(kwargs)
         
         # Convert response to dict (handles all LangChain response types)
         try:
@@ -181,14 +177,8 @@ class ParquetLogger(BaseCallbackHandler):
     
     def on_llm_error(self, error, **kwargs):
         """Log LLM error event with error details in payload."""
-        # Safely extract logger_custom_id from LangChain metadata
-        try:
-            langchain_metadata = kwargs.get('metadata', {}) or {}
-            custom_id_value = langchain_metadata.get('logger_custom_id', '')
-            # Convert to string, but handle None specially to become empty string
-            logger_custom_id = '' if custom_id_value is None else str(custom_id_value)
-        except (AttributeError, TypeError):
-            logger_custom_id = ''
+        # Extract logger_custom_id from tags (persists through all events)
+        logger_custom_id = self._extract_custom_id_from_tags(kwargs)
         
         payload_data = {
             'error': str(error),

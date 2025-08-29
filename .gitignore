@@ -26,8 +26,10 @@ wheels/
 # Logs
 *.log
 llm_logs/
+llm_batch_logs/
 batch_logs/
 logs/
+test_logs/
 
 # Parquet files
 *.parquet
