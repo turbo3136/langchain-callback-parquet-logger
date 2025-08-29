@@ -7,7 +7,7 @@ import atexit  # For automatic cleanup on exit
 import warnings
 from pathlib import Path
 from datetime import datetime, date, timezone
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Literal
 import pyarrow as pa
 import pyarrow.parquet as pq
 from langchain_core.callbacks import BaseCallbackHandler
@@ -26,7 +26,7 @@ SCHEMA = pa.schema([
 class ParquetLogger(BaseCallbackHandler):
     """Simplified Parquet logger with flexible JSON payload schema."""
     
-    def __init__(self, log_dir: str = "./llm_logs", buffer_size: int = 100, provider: str = "openai", logger_metadata: Optional[Dict[str, Any]] = None):
+    def __init__(self, log_dir: str = "./llm_logs", buffer_size: int = 100, provider: str = "openai", logger_metadata: Optional[Dict[str, Any]] = None, partition_on: Optional[Literal["date"]] = "date"):
         """
         Initialize the Parquet logger.
         
@@ -35,12 +35,14 @@ class ParquetLogger(BaseCallbackHandler):
             buffer_size: Number of entries to buffer before flushing to disk
             provider: LLM provider name (default: "openai")
             logger_metadata: Optional dictionary of metadata to include with all log entries
+            partition_on: Partitioning strategy - "date" for daily partitions or None for no partitioning (default: "date")
         """
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.buffer_size = buffer_size
         self.provider = provider
         self.logger_metadata = logger_metadata or {}
+        self.partition_on = partition_on
         # Safely serialize metadata with fallback
         try:
             self.logger_metadata_json = json.dumps(self.logger_metadata, default=str)
@@ -244,14 +246,19 @@ class ParquetLogger(BaseCallbackHandler):
                 schema=SCHEMA
             )
             
-            # Daily partitioning
-            today = date.today()
-            partition_dir = self.log_dir / f"date={today}"
-            partition_dir.mkdir(exist_ok=True)
+            # Determine output directory based on partitioning strategy
+            if self.partition_on == "date":
+                # Daily partitioning
+                today = date.today()
+                output_dir = self.log_dir / f"date={today}"
+                output_dir.mkdir(exist_ok=True)
+            else:
+                # No partitioning - save directly to log_dir
+                output_dir = self.log_dir
             
             # Unique filename
             timestamp = datetime.now().strftime('%H%M%S_%f')
-            filepath = partition_dir / f"logs_{timestamp}.parquet"
+            filepath = output_dir / f"logs_{timestamp}.parquet"
             
             # Write to Parquet
             pq.write_table(table, filepath, compression='snappy')

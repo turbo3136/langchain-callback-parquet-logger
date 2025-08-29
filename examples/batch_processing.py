@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
 from langchain_core.runnables import RunnableLambda
-from langchain_callback_parquet_logger import ParquetLogger, with_custom_id
+from langchain_callback_parquet_logger import ParquetLogger, with_tags
 
 
 # ---------- 1) Progress tracking utility for batch operations ----------
@@ -84,7 +84,11 @@ async def main():
                     },
                 ],
                 # Add custom ID for tracking individual requests in the batch
-                config=with_custom_id(f"weather-batch-{city.lower().replace(' ', '-')}")
+                # Also add tags to categorize this as a batch weather query
+                config=with_tags(
+                    custom_id=f"weather-batch-{city.lower().replace(' ', '-')}",
+                    tags=["batch-processing", "weather-api", "structured-output"]
+                )
             )
             await progress.update()  # Update progress after each completion
             return result

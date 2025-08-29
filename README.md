@@ -73,6 +73,7 @@ logger.flush()  # Manually write logs to disk
 - `buffer_size` (int, default: 100): Number of entries before auto-flush
 - `provider` (str, default: "openai"): LLM provider name for tracking
 - `logger_metadata` (dict, optional): Logger-level metadata included in all log entries
+- `partition_on` (str or None, default: "date"): Partitioning strategy - "date" for daily partitions or None for no partitioning
 
 ### Log Structure
 
@@ -90,6 +91,7 @@ Logs are saved as Parquet files with the following schema:
 
 ### File Organization
 
+#### With Date Partitioning (default):
 ```
 llm_logs/
 ├── date=2024-01-15/
@@ -97,6 +99,14 @@ llm_logs/
 │   └── logs_150331_789012.parquet
 └── date=2024-01-16/
     └── logs_090122_345678.parquet
+```
+
+#### Without Partitioning:
+```
+llm_logs/
+├── logs_143022_123456.parquet
+├── logs_150331_789012.parquet
+└── logs_090122_345678.parquet
 ```
 
 ## Reading Logs
@@ -219,23 +229,45 @@ logger = ParquetLogger(
 )
 ```
 
-### Request-Level Custom IDs
-Track specific requests with custom IDs that persist through all callback events:
+### Request-Level Tracking with Tags
+
+The `with_tags` helper provides flexible request tracking with custom IDs and tags that persist through all callback events:
 
 ```python
-from langchain_callback_parquet_logger import with_custom_id
+from langchain_callback_parquet_logger import with_tags
 
-# Using the helper function (recommended)
+# Simple custom ID
 response = llm.invoke(
     "What is quantum computing?",
-    config=with_custom_id("user-123-session-456-req-789")
+    config=with_tags(custom_id="user-123-session-456-req-789")
 )
 
-# Or using tags directly
+# Custom ID with additional tags (positional)
 response = llm.invoke(
     "What is quantum computing?",
-    tags=["logger_custom_id:user-123-session-456-req-789"]
+    config=with_tags("production", "high-priority", custom_id="req-789")
 )
+
+# Multiple tags without custom ID
+response = llm.invoke(
+    "What is quantum computing?",
+    config=with_tags("experimental", "gpt-4", "complex-query")
+)
+
+# Extend existing config
+existing = {"tags": ["baseline"], "metadata": {"user": "john"}}
+response = llm.invoke(
+    "What is quantum computing?",
+    config=with_tags("urgent", custom_id="req-999", config=existing)
+)
+# Result: tags = ["baseline", "urgent", "logger_custom_id:req-999"]
+
+# Replace existing tags instead of extending
+response = llm.invoke(
+    "What is quantum computing?",
+    config=with_tags("new-tag", custom_id="req-777", config=existing, replace_tags=True)
+)
+# Result: tags = ["new-tag", "logger_custom_id:req-777"] (baseline replaced)
 ```
 
 **Note**: We use tags instead of metadata because LangChain tags persist through all callback events (on_llm_start, on_llm_end, on_llm_error), while metadata only reaches the start event.
@@ -256,6 +288,30 @@ with ParquetLogger(log_dir="./logs") as logger:
 ```
 
 ## Advanced Usage
+
+### Partitioning Options
+
+Control how log files are organized:
+
+```python
+# Default: Daily date partitioning
+logger = ParquetLogger(
+    log_dir="./logs",
+    partition_on="date"  # Creates date=YYYY-MM-DD subdirectories
+)
+
+# No partitioning - files saved directly to log_dir
+logger = ParquetLogger(
+    log_dir="./logs",
+    partition_on=None  # All files in ./logs/
+)
+
+# Save to current directory without partitioning
+logger = ParquetLogger(
+    log_dir=".",
+    partition_on=None  # Files saved directly to current directory
+)
+```
 
 ### Custom Buffer Size for Batch Processing
 
