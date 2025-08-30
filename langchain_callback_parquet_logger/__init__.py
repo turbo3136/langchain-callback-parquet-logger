@@ -2,7 +2,7 @@
 from .logger import ParquetLogger
 from typing import Optional, Dict, Any, List
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 
 def with_tags(*additional_tags: str, custom_id: Optional[str] = None,
