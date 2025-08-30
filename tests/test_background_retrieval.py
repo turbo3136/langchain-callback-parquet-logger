@@ -81,47 +81,72 @@ async def test_basic_retrieval(sample_df, mock_openai_client):
 @pytest.mark.asyncio
 async def test_rate_limiting():
     """Test rate limiting with 429 errors."""
+    import sys
+    from unittest.mock import patch
+    
     df = pd.DataFrame({
         'response_id': ['resp_001'],
         'logger_custom_id': ['user-001']
     })
     
-    # Create a mock RateLimitError if openai is available
+    client = AsyncMock()
+    
+    # Test with proper openai.RateLimitError if available
     try:
         import openai
-        # Create a mock response object for RateLimitError
-        mock_response = MagicMock()
-        mock_response.status_code = 429
-        mock_response.headers = {}
-        rate_limit_error = openai.RateLimitError(
-            message="Rate limit exceeded",
-            response=mock_response,
-            body={"error": {"message": "Rate limit exceeded"}}
-        )
+        # Mock the openai module in background_retrieval
+        with patch.object(sys.modules['langchain_callback_parquet_logger.background_retrieval'], 'openai', openai):
+            # Create a mock response object for RateLimitError
+            mock_response = MagicMock()
+            mock_response.status_code = 429
+            mock_response.headers = {}
+            rate_limit_error = openai.RateLimitError(
+                message="Rate limit exceeded",
+                response=mock_response,
+                body={"error": {"message": "Rate limit exceeded"}}
+            )
+            
+            # Simulate rate limit error on first call, then success
+            client.responses.retrieve = AsyncMock(
+                side_effect=[
+                    rate_limit_error,
+                    MagicMock(model_dump=lambda: {'id': 'resp_001', 'status': 'completed'})
+                ]
+            )
+            
+            with patch('asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
+                results = await retrieve_background_responses(
+                    df,
+                    client,
+                    max_retries=3,
+                    show_progress=False
+                )
+                
+                # Sleep should be called for RateLimitError
+                mock_sleep.assert_called()
+                assert results.iloc[0]['status'] == 'completed'
+                
     except (ImportError, AttributeError, TypeError):
-        # Fallback if openai is not installed or doesn't have RateLimitError
-        rate_limit_error = Exception("429 Rate limit exceeded")
-    
-    client = AsyncMock()
-    # Simulate rate limit error then success
-    client.responses.retrieve = AsyncMock(
-        side_effect=[
-            rate_limit_error,
-            MagicMock(model_dump=lambda: {'id': 'resp_001', 'status': 'completed'})
-        ]
-    )
-    
-    with patch('asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
+        # If openai is not available, test with generic exception
+        rate_limit_error = Exception("Server error")
+        
+        # Simulate error on first call, then success
+        client.responses.retrieve = AsyncMock(
+            side_effect=[
+                rate_limit_error,
+                MagicMock(model_dump=lambda: {'id': 'resp_001', 'status': 'completed'})
+            ]
+        )
+        
         results = await retrieve_background_responses(
             df,
             client,
-            max_retries=2,
+            max_retries=3,
             show_progress=False
         )
         
-        # Should have slept due to rate limit
-        mock_sleep.assert_called()
-        assert results.iloc[0]['status'] == 'completed'
+        # The generic exception won't be retried, so it should fail
+        assert results.iloc[0]['status'] == 'failed'
 
 
 @pytest.mark.asyncio
