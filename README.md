@@ -205,6 +205,42 @@ logs/
     └── logs_090122_345678.parquet
 ```
 
+## Background Response Retrieval (v0.4.0+)
+
+Retrieve completed responses from OpenAI's background/async requests:
+
+```python
+import pandas as pd
+import openai
+from langchain_callback_parquet_logger import retrieve_background_responses, ParquetLogger
+
+# DataFrame with response IDs from background requests
+df = pd.DataFrame({
+    'response_id': ['resp_123...', 'resp_456...'],
+    'logger_custom_id': ['user-001', 'user-002']
+})
+
+# Retrieve and log responses
+client = openai.AsyncClient()
+with ParquetLogger('./retrieval_logs') as logger:
+    results = await retrieve_background_responses(
+        df,
+        client,
+        logger=logger,
+        show_progress=True,
+        checkpoint_file='./checkpoint.parquet'  # Resume capability
+    )
+```
+
+### Features
+- **Automatic rate limiting** with exponential backoff
+- **Checkpoint/resume** for interrupted retrievals
+- **Memory-efficient mode** with `return_results=False`
+- **Progress tracking** with tqdm
+- **Structured logging** of attempts, completions, and errors
+
+See [examples/retrieve_background_responses.py](examples/retrieve_background_responses.py) for detailed usage.
+
 ## Examples
 
 - [`basic_usage.py`](examples/basic_usage.py) - Simple logging example
@@ -212,6 +248,7 @@ logs/
 - [`simple_batch_example.py`](examples/simple_batch_example.py) - Before/after batch processing comparison
 - [`memory_efficient_batch.py`](examples/memory_efficient_batch.py) - Memory-efficient processing for huge DataFrames
 - [`partitioning_example.py`](examples/partitioning_example.py) - Partitioning strategies
+- [`retrieve_background_responses.py`](examples/retrieve_background_responses.py) - Background response retrieval
 
 ## License
 

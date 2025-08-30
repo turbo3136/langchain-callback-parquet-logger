@@ -2,7 +2,7 @@
 from .logger import ParquetLogger
 from typing import Optional, Dict, Any, List
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 
 def with_tags(*additional_tags: str, custom_id: Optional[str] = None,
@@ -77,9 +77,22 @@ except ImportError:
     _batch_helpers_available = False
     batch_run = None
 
+# Import background retrieval helper
+try:
+    from .background_retrieval import retrieve_background_responses
+    _background_retrieval_available = True
+except ImportError:
+    # Background retrieval is optional (requires openai)
+    _background_retrieval_available = False
+    retrieve_background_responses = None
+
 # Define exports
 __all__ = ['ParquetLogger', 'with_tags', '__version__']
 
 # Add batch helper to exports if available
 if _batch_helpers_available:
     __all__.append('batch_run')
+
+# Add background retrieval to exports if available
+if _background_retrieval_available:
+    __all__.append('retrieve_background_responses')
