@@ -44,7 +44,7 @@ def mock_openai_client():
         'usage': {'total_tokens': 100}
     }
     
-    client.beta.responses.retrieve = AsyncMock(return_value=mock_response)
+    client.responses.retrieve = AsyncMock(return_value=mock_response)
     return client
 
 
@@ -70,7 +70,7 @@ async def test_basic_retrieval(sample_df, mock_openai_client):
         assert all(results['status'] == 'completed')
         
         # Verify API was called for each response
-        assert mock_openai_client.beta.responses.retrieve.call_count == 3
+        assert mock_openai_client.responses.retrieve.call_count == 3
         
         # Check logs were created
         logger.flush()
@@ -86,11 +86,19 @@ async def test_rate_limiting():
         'logger_custom_id': ['user-001']
     })
     
+    # Create a mock RateLimitError if openai is available
+    try:
+        import openai
+        rate_limit_error = openai.RateLimitError("Rate limit exceeded")
+    except (ImportError, AttributeError):
+        # Fallback if openai is not installed or doesn't have RateLimitError
+        rate_limit_error = Exception("429 Rate limit exceeded")
+    
     client = AsyncMock()
     # Simulate rate limit error then success
-    client.beta.responses.retrieve = AsyncMock(
+    client.responses.retrieve = AsyncMock(
         side_effect=[
-            Exception("429 Rate limit exceeded"),
+            rate_limit_error,
             MagicMock(model_dump=lambda: {'id': 'resp_001', 'status': 'completed'})
         ]
     )
@@ -121,7 +129,7 @@ async def test_checkpoint_resume(sample_df):
         
         client = AsyncMock()
         mock_response = MagicMock(model_dump=lambda: {'id': 'resp', 'status': 'completed'})
-        client.beta.responses.retrieve = AsyncMock(return_value=mock_response)
+        client.responses.retrieve = AsyncMock(return_value=mock_response)
         
         # Run retrieval with checkpoint
         results = await retrieve_background_responses(
@@ -132,7 +140,7 @@ async def test_checkpoint_resume(sample_df):
         )
         
         # Should only retrieve 2 responses (resp_002 and resp_003)
-        assert client.beta.responses.retrieve.call_count == 2
+        assert client.responses.retrieve.call_count == 2
         
         # First response should be marked as already processed
         resp_001_result = results[results['response_id'] == 'resp_001'].iloc[0]
@@ -162,7 +170,7 @@ async def test_memory_efficient_mode(sample_df, mock_openai_client):
         assert len(log_files) > 0
         
         # Verify all responses were retrieved
-        assert mock_openai_client.beta.responses.retrieve.call_count == 3
+        assert mock_openai_client.responses.retrieve.call_count == 3
 
 
 @pytest.mark.asyncio
@@ -174,7 +182,7 @@ async def test_partial_failures(mock_openai_client):
     })
     
     # Mock mixed success/failure responses
-    mock_openai_client.beta.responses.retrieve = AsyncMock(
+    mock_openai_client.responses.retrieve = AsyncMock(
         side_effect=[
             MagicMock(model_dump=lambda: {'id': 'resp_001', 'status': 'completed'}),
             Exception("404 Not found"),
@@ -206,7 +214,7 @@ async def test_missing_columns():
     })
     
     client = AsyncMock()
-    client.beta.responses.retrieve = AsyncMock(
+    client.responses.retrieve = AsyncMock(
         return_value=MagicMock(model_dump=lambda: {'id': 'resp_001'})
     )
     
@@ -246,7 +254,7 @@ async def test_timeout_handling():
     async def never_complete(response_id):
         await asyncio.sleep(100)
     
-    client.beta.responses.retrieve = AsyncMock(side_effect=never_complete)
+    client.responses.retrieve = AsyncMock(side_effect=never_complete)
     
     results = await retrieve_background_responses(
         df,
@@ -277,7 +285,7 @@ async def test_batch_processing():
         call_times.append(asyncio.get_event_loop().time())
         return MagicMock(model_dump=lambda: {'id': response_id})
     
-    client.beta.responses.retrieve = AsyncMock(side_effect=track_calls)
+    client.responses.retrieve = AsyncMock(side_effect=track_calls)
     
     await retrieve_background_responses(
         df,
@@ -287,7 +295,7 @@ async def test_batch_processing():
     )
     
     # All should be retrieved
-    assert client.beta.responses.retrieve.call_count == 10
+    assert client.responses.retrieve.call_count == 10
 
 
 @pytest.mark.asyncio
@@ -302,7 +310,7 @@ async def test_logging_event_types():
         logger = ParquetLogger(log_dir=tmpdir, buffer_size=1)
         
         client = AsyncMock()
-        client.beta.responses.retrieve = AsyncMock(
+        client.responses.retrieve = AsyncMock(
             return_value=MagicMock(model_dump=lambda: {'id': 'resp_001'})
         )
         

@@ -7,6 +7,7 @@ with automatic logging to Parquet files, rate limiting, and checkpoint support.
 
 import asyncio
 import json
+import random
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,11 @@ try:
     import pandas as pd
 except ImportError:
     pd = None
+
+try:
+    import openai
+except ImportError:
+    openai = None
 
 from .logger import ParquetLogger
 
@@ -162,7 +168,7 @@ async def retrieve_background_responses(
                 
                 # Make request with timeout
                 response = await asyncio.wait_for(
-                    openai_client.beta.responses.retrieve(response_id),
+                    openai_client.responses.retrieve(response_id),
                     timeout=timeout
                 )
                 
@@ -210,20 +216,26 @@ async def retrieve_background_responses(
             except asyncio.TimeoutError:
                 last_error = f"Timeout after {timeout}s"
                 await asyncio.sleep(2 ** attempt)
-                
+            
             except Exception as e:
-                last_error = str(e)
+                # Check if it's a RateLimitError from OpenAI
+                if openai and isinstance(e, openai.RateLimitError):
+                    # Handle rate limit errors with exponential backoff and jitter
+                    last_error = str(e)
+                    delay = min(60, (2 ** attempt) * (1 + random.random() * 0.1))
+                    await asyncio.sleep(delay)
+                    continue
                 
-                # Check for rate limit error
-                if '429' in str(e) or 'rate' in str(e).lower():
-                    # Exponential backoff for rate limits
-                    wait_time = min(60, 2 ** attempt)
-                    await asyncio.sleep(wait_time)
-                elif '5' in str(e)[:3]:  # 5xx errors
+                # Handle other exceptions
+                last_error = str(e)
+                error_str = str(e)
+                
+                # Check for server errors (5xx)
+                if any(error_str.startswith(f'5{x}') for x in '0123456789'):
                     # Retry with backoff for server errors
                     await asyncio.sleep(2 ** attempt)
                 else:
-                    # Don't retry for client errors (4xx except 429)
+                    # Don't retry for other client errors (4xx)
                     break
         
         # Log failure after all retries
