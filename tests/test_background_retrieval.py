@@ -89,8 +89,16 @@ async def test_rate_limiting():
     # Create a mock RateLimitError if openai is available
     try:
         import openai
-        rate_limit_error = openai.RateLimitError("Rate limit exceeded")
-    except (ImportError, AttributeError):
+        # Create a mock response object for RateLimitError
+        mock_response = MagicMock()
+        mock_response.status_code = 429
+        mock_response.headers = {}
+        rate_limit_error = openai.RateLimitError(
+            message="Rate limit exceeded",
+            response=mock_response,
+            body={"error": {"message": "Rate limit exceeded"}}
+        )
+    except (ImportError, AttributeError, TypeError):
         # Fallback if openai is not installed or doesn't have RateLimitError
         rate_limit_error = Exception("429 Rate limit exceeded")
     
