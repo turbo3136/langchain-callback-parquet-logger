@@ -510,7 +510,8 @@ class ParquetLogger(BaseCallbackHandler):
             ts = pa.array([e["timestamp"] for e in self.buffer],
                           type=pa.timestamp("us", tz="UTC"))
             run_id = pa.array([e["run_id"] for e in self.buffer], type=pa.string())
-            parent_run_id = pa.array([e["parent_run_id"] for e in self.buffer], type=pa.string())
+            # Handle backward compatibility - entries may not have parent_run_id
+            parent_run_id = pa.array([e.get("parent_run_id", "") for e in self.buffer], type=pa.string())
             logger_custom_id = pa.array([e["logger_custom_id"] for e in self.buffer], type=pa.string())
             event_type = pa.array([e["event_type"] for e in self.buffer], type=pa.string())
             provider = pa.array([e["provider"] for e in self.buffer], type=pa.string())
