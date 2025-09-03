@@ -2,15 +2,23 @@
 import json
 import threading
 import time  # Explicit import to ensure it's available for PyArrow
-import sys  # Ensure sys is available
 import atexit  # For automatic cleanup on exit
 import warnings
 from pathlib import Path
 from datetime import datetime, date, timezone
 from typing import Dict, Any, List, Optional, Literal, Set
+from io import BytesIO
 import pyarrow as pa
 import pyarrow.parquet as pq
 from langchain_core.callbacks import BaseCallbackHandler
+
+# Optional boto3 import for S3 support
+try:
+    import boto3
+    HAS_BOTO3 = True
+except ImportError:
+    boto3 = None
+    HAS_BOTO3 = False
 
 # Define explicit schema to avoid type inference issues
 SCHEMA = pa.schema([
@@ -33,7 +41,11 @@ class ParquetLogger(BaseCallbackHandler):
                  provider: str = "openai", 
                  logger_metadata: Optional[Dict[str, Any]] = None, 
                  partition_on: Optional[Literal["date"]] = "date",
-                 event_types: Optional[List[str]] = None):
+                 event_types: Optional[List[str]] = None,
+                 s3_bucket: Optional[str] = None,
+                 s3_prefix: str = "langchain-logs/",
+                 s3_on_failure: Literal["error", "continue"] = "error",
+                 s3_retry_attempts: int = 3):
         """
         Initialize the Parquet logger.
         
@@ -48,6 +60,10 @@ class ParquetLogger(BaseCallbackHandler):
                                 'chain_start', 'chain_end', 'chain_error',
                                 'tool_start', 'tool_end', 'tool_error',
                                 'agent_action', 'agent_finish'
+            s3_bucket: Optional S3 bucket name for uploading logs
+            s3_prefix: Prefix/folder path in S3 bucket (default: "langchain-logs/")
+            s3_on_failure: How to handle S3 upload failures - "error" to raise exception, "continue" to log and continue
+            s3_retry_attempts: Number of retry attempts for failed S3 uploads (default: 3)
         """
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -55,6 +71,19 @@ class ParquetLogger(BaseCallbackHandler):
         self.provider = provider
         self.logger_metadata = logger_metadata or {}
         self.partition_on = partition_on
+        
+        # S3 configuration
+        self.s3_bucket = s3_bucket
+        self.s3_prefix = s3_prefix.rstrip('/') + '/' if s3_prefix else ''
+        self.s3_on_failure = s3_on_failure
+        self.s3_retry_attempts = s3_retry_attempts
+        
+        # Check if boto3 is available when S3 is configured
+        if self.s3_bucket and not HAS_BOTO3:
+            raise ImportError(
+                "boto3 is required for S3 support. "
+                "Install it with: pip install langchain-callback-parquet-logger[s3]"
+            )
         
         # Set event types to log
         if event_types is None:
@@ -500,6 +529,52 @@ class ParquetLogger(BaseCallbackHandler):
         with self.lock:
             self._flush()
     
+    def _upload_to_s3(self, table: pa.Table, relative_path: Path):
+        """Upload Parquet table to S3 with retry logic.
+        
+        Args:
+            table: PyArrow table to upload
+            relative_path: Path relative to log_dir for S3 key construction
+        """
+        if not self.s3_bucket:
+            return
+        
+        # Construct S3 key
+        s3_key = f"{self.s3_prefix}{relative_path}"
+        
+        # Attempt upload with retries
+        for attempt in range(self.s3_retry_attempts):
+            try:
+                # Write table to BytesIO buffer
+                buffer = BytesIO()
+                pq.write_table(table, buffer, compression='snappy')
+                buffer.seek(0)
+                
+                # Create S3 client (uses default credential chain)
+                s3_client = boto3.client('s3')
+                
+                # Upload to S3
+                s3_client.put_object(
+                    Bucket=self.s3_bucket,
+                    Key=s3_key,
+                    Body=buffer.getvalue()
+                )
+                
+                return  # Success
+                
+            except Exception as e:
+                if attempt == self.s3_retry_attempts - 1:
+                    # Final attempt failed
+                    error_msg = f"Failed to upload to S3 after {self.s3_retry_attempts} attempts: {e}"
+                    if self.s3_on_failure == "error":
+                        raise RuntimeError(error_msg) from e
+                    else:
+                        print(f"S3 upload failed (continuing): {error_msg}")
+                        return
+                
+                # Exponential backoff before retry
+                time.sleep(2 ** attempt)
+    
     def _flush(self):
         """Write buffer to Parquet file."""
         if not self.buffer:
@@ -529,7 +604,7 @@ class ParquetLogger(BaseCallbackHandler):
                 # Daily partitioning
                 today = date.today()
                 output_dir = self.log_dir / f"date={today}"
-                output_dir.mkdir(exist_ok=True)
+                output_dir.mkdir(parents=True, exist_ok=True)
             else:
                 # No partitioning - save directly to log_dir
                 output_dir = self.log_dir
@@ -540,7 +615,17 @@ class ParquetLogger(BaseCallbackHandler):
             
             # Write to Parquet
             pq.write_table(table, filepath, compression='snappy')
+            
+            # Upload to S3 if configured
+            if self.s3_bucket:
+                # Calculate relative path for S3 key
+                relative_path = filepath.relative_to(self.log_dir)
+                self._upload_to_s3(table, relative_path)
+            
             self.buffer = []
+        except RuntimeError:
+            # Re-raise S3 errors when in error mode
+            raise
         except Exception as e:
             import traceback
             print(f"Failed to write logs: {e}")
@@ -552,6 +637,7 @@ class ParquetLogger(BaseCallbackHandler):
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit - ensure buffer is flushed."""
+        _ = (exc_type, exc_val, exc_tb)  # Unused but required by protocol
         self.flush()
         return False
     
