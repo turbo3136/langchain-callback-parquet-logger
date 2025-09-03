@@ -45,8 +45,16 @@ python -m twine upload dist/*
 This package provides a high-performance callback handler for logging LangChain LLM interactions to Parquet files. The architecture consists of three main components:
 
 ### 1. Core Logging System (`logger.py`)
-- **ParquetLogger**: Main callback handler that intercepts LangChain events (on_llm_start, on_llm_end, on_llm_error)
-- Uses a 7-column schema: timestamp, run_id, logger_custom_id, event_type, provider, logger_metadata, payload
+- **ParquetLogger**: Main callback handler that intercepts LangChain events
+- **Enhanced Event Support (v0.5.0+)**:
+  - LLM events: on_llm_start, on_llm_end, on_llm_error
+  - Chain events: on_chain_start, on_chain_end, on_chain_error
+  - Tool events: on_tool_start, on_tool_end, on_tool_error
+  - Agent events: on_agent_action, on_agent_finish
+  - Configurable via `event_types` parameter (defaults to LLM events only for backward compatibility)
+- **Schema**: 8 columns with hierarchy support
+  - timestamp, run_id, parent_run_id, logger_custom_id, event_type, provider, logger_metadata, payload
+  - `parent_run_id` enables tracking of execution hierarchy (chains → LLMs → tools)
 - Buffers entries in memory (configurable size) before flushing to Parquet files
 - Thread-safe with lock-based synchronization
 - Supports daily partitioning (date=YYYY-MM-DD) or flat structure
@@ -92,7 +100,7 @@ The package writes Parquet files with the following structure:
 - Default: `./logs/date=YYYY-MM-DD/logs_HHMMSS_microseconds.parquet`
 - No partitioning: `./logs/logs_HHMMSS_microseconds.parquet`
 
-Reading logs:
+### Basic Usage
 ```python
 import pandas as pd
 import json
@@ -100,6 +108,49 @@ import json
 df = pd.read_parquet("./logs")
 # Parse JSON payload
 df['data'] = df['payload'].apply(json.loads)
+```
+
+### Enhanced Event Logging (v0.5.0+)
+```python
+from langchain_callback_parquet_logger import ParquetLogger
+
+# Log all event types including chains, tools, and agents
+logger = ParquetLogger(
+    './logs',
+    event_types=['llm_start', 'llm_end', 'llm_error',
+                 'chain_start', 'chain_end', 'chain_error',
+                 'tool_start', 'tool_end', 'tool_error',
+                 'agent_action', 'agent_finish']
+)
+
+# Use with LangChain components
+chain = SomeChain(callbacks=[logger])
+chain.run("input")
+```
+
+### Analyzing Execution Hierarchy
+```python
+# Read logs with hierarchy information
+df = pd.read_parquet("./logs")
+
+# Find all events related to a specific chain execution
+chain_run_id = "abc-123"
+chain_events = df[
+    (df['run_id'] == chain_run_id) | 
+    (df['parent_run_id'] == chain_run_id)
+]
+
+# Build execution tree
+def get_children(df, parent_id):
+    return df[df['parent_run_id'] == parent_id]
+
+# Trace complete execution flow
+root_events = df[df['parent_run_id'] == '']
+for root in root_events.itertuples():
+    print(f"Root: {root.event_type} ({root.run_id})")
+    children = get_children(df, root.run_id)
+    for child in children.itertuples():
+        print(f"  └─ {child.event_type} ({child.run_id})")
 ```
 
 ## Version Management
