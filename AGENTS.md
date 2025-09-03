@@ -27,8 +27,11 @@ pip install -e ".[test]"
 # Install with background retrieval support
 pip install -e ".[background]"
 
+# Install with S3 support
+pip install -e ".[s3]"
+
 # Install all optional dependencies
-pip install -e ".[test,background]"
+pip install -e ".[test,background,s3]"
 ```
 
 ### Package Building
@@ -42,7 +45,7 @@ python -m twine upload dist/*
 
 ## Architecture Overview
 
-This package provides a high-performance callback handler for logging LangChain LLM interactions to Parquet files. The architecture consists of three main components:
+This package provides a high-performance callback handler for logging LangChain LLM interactions to Parquet files with optional S3 upload support. The architecture consists of four main components:
 
 ### 1. Core Logging System (`logger.py`)
 - **ParquetLogger**: Main callback handler that intercepts LangChain events
@@ -59,6 +62,7 @@ This package provides a high-performance callback handler for logging LangChain 
 - Thread-safe with lock-based synchronization
 - Supports daily partitioning (date=YYYY-MM-DD) or flat structure
 - All event data stored as JSON strings in the payload column for flexibility
+- **S3 Support (v0.6.0+)**: Optional upload to S3 with retry logic and configurable failure handling
 
 ### 2. Batch Processing (`batch_helpers.py`)
 - **batch_run()**: Async function for processing DataFrames of prompts through LLMs
@@ -74,6 +78,12 @@ This package provides a high-performance callback handler for logging LangChain 
 - Checkpoint/resume capability via Parquet files
 - Logs three event types: background_retrieval_attempt, background_retrieval_complete, background_retrieval_error
 - Reuses ParquetLogger's _add_entry() method for consistent logging
+
+### 4. S3 Integration
+- **Optional Feature**: S3 upload only activates when `s3_bucket` parameter is provided
+- **Failure Modes**: `error` mode for ephemeral environments (Hex.tech), `continue` mode for development
+- **Retry Logic**: Exponential backoff with configurable attempts
+- **Credential Chain**: Uses boto3's standard AWS credential resolution
 
 ## Key Design Patterns
 
@@ -92,6 +102,7 @@ ParquetLogger accumulates entries in memory until buffer_size is reached, then w
 Package uses try/except imports to make features optional:
 - batch_helpers requires pandas (always available if using batch features)
 - background_retrieval requires openai, pandas, and tqdm
+- S3 support requires boto3
 - Import failures are silent, features simply won't be available
 
 ## Working with Parquet Files
@@ -168,3 +179,4 @@ Core dependencies (always required):
 Optional dependency groups:
 - `[test]`: pytest, pytest-asyncio, pytest-mock, pandas
 - `[background]`: openai, pandas, tqdm
+- `[s3]`: boto3

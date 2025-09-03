@@ -9,6 +9,7 @@ A high-performance callback handler for logging LangChain LLM interactions to Pa
 - 📅 **Partitioning**: Optional daily partitioning for better organization
 - 🏷️ **Custom Tracking**: Add custom IDs and metadata to your logs
 - 🔄 **Batch Processing**: Simple helper for DataFrame batch operations
+- ☁️ **S3 Upload**: Optional S3 upload for ephemeral environments
 - 🔒 **Thread-Safe**: Safe for concurrent LLM calls
 
 ## Installation
@@ -119,6 +120,66 @@ df_logs = pd.read_parquet('./logs')
 results = df_logs[df_logs['event_type'] == 'llm_end']
 ```
 
+### 4. S3 Upload Support (v0.6.0+)
+
+Upload logs directly to S3 for persistent storage in ephemeral environments (e.g., Hex.tech scheduled runs):
+
+```python
+from langchain_callback_parquet_logger import ParquetLogger
+from langchain_openai import ChatOpenAI
+
+# For Hex.tech scheduled runs or other ephemeral environments
+logger = ParquetLogger(
+    log_dir="./logs",
+    s3_bucket="my-llm-logs",
+    s3_prefix="hex-runs/",
+    s3_on_failure="error",  # Fail fast to avoid data loss
+    buffer_size=10  # Flush frequently
+)
+
+llm = ChatOpenAI(model="gpt-4o-mini", callbacks=[logger])
+response = llm.invoke("Hello!")
+```
+
+#### S3 Configuration
+
+Install with S3 support:
+```bash
+pip install "langchain-callback-parquet-logger[s3]"
+```
+
+Authentication uses boto3's standard credential chain:
+- Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
+- IAM roles (for EC2/ECS/Lambda)
+- AWS credentials file (`~/.aws/credentials`)
+
+#### Usage Examples
+
+**Production (Hex.tech scheduled runs):**
+```python
+# Fail fast on S3 errors to avoid data loss
+logger = ParquetLogger(
+    log_dir="./logs",
+    s3_bucket="prod-llm-logs",
+    s3_prefix=f"runs/{datetime.now():%Y-%m-%d}/",
+    s3_on_failure="error",  # Raises exception on S3 failure
+    buffer_size=10  # Smaller buffer for frequent uploads
+)
+```
+
+**Development:**
+```python
+# Continue on S3 errors during development
+logger = ParquetLogger(
+    log_dir="./logs",
+    s3_bucket=os.getenv("S3_BUCKET"),  # Optional S3
+    s3_on_failure="continue",  # Just log errors
+    buffer_size=100  # Larger buffer for efficiency
+)
+```
+
+Files are always written locally first, then uploaded to S3. The S3 structure mirrors the local directory structure with the configured prefix.
+
 ## Configuration Options
 
 ### ParquetLogger Parameters
@@ -130,6 +191,11 @@ results = df_logs[df_logs['event_type'] == 'llm_end']
 | `provider` | str | "openai" | LLM provider name |
 | `logger_metadata` | dict | {} | Metadata for all logs |
 | `partition_on` | str/None | "date" | "date" or None for no partitioning |
+| `event_types` | list/None | None | Event types to log (defaults to LLM events) |
+| `s3_bucket` | str/None | None | S3 bucket name (enables S3 when set) |
+| `s3_prefix` | str | "langchain-logs/" | Prefix/folder in S3 bucket |
+| `s3_on_failure` | str | "error" | "error" or "continue" on S3 failures |
+| `s3_retry_attempts` | int | 3 | Number of retry attempts for S3 |
 
 ### batch_run Parameters
 
@@ -182,8 +248,9 @@ df = conn.execute("""
 |--------|------|-------------|
 | `timestamp` | timestamp | Event time (UTC) |
 | `run_id` | string | Unique run ID |
+| `parent_run_id` | string | Parent run ID for hierarchy tracking |
 | `logger_custom_id` | string | Your custom ID |
-| `event_type` | string | llm_start/end/error |
+| `event_type` | string | Event type (llm_start, chain_end, etc.) |
 | `provider` | string | LLM provider |
 | `logger_metadata` | string | JSON metadata |
 | `payload` | string | JSON event data |
