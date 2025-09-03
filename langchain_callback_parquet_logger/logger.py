@@ -7,7 +7,7 @@ import atexit  # For automatic cleanup on exit
 import warnings
 from pathlib import Path
 from datetime import datetime, date, timezone
-from typing import Dict, Any, List, Optional, Literal
+from typing import Dict, Any, List, Optional, Literal, Set
 import pyarrow as pa
 import pyarrow.parquet as pq
 from langchain_core.callbacks import BaseCallbackHandler
@@ -16,6 +16,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 SCHEMA = pa.schema([
     ("timestamp", pa.timestamp("us", tz="UTC")),
     ("run_id", pa.string()),
+    ("parent_run_id", pa.string()),
     ("logger_custom_id", pa.string()),
     ("event_type", pa.string()),
     ("provider", pa.string()),
@@ -26,7 +27,13 @@ SCHEMA = pa.schema([
 class ParquetLogger(BaseCallbackHandler):
     """Simplified Parquet logger with flexible JSON payload schema."""
     
-    def __init__(self, log_dir: str = "./llm_logs", buffer_size: int = 100, provider: str = "openai", logger_metadata: Optional[Dict[str, Any]] = None, partition_on: Optional[Literal["date"]] = "date"):
+    def __init__(self, 
+                 log_dir: str = "./llm_logs", 
+                 buffer_size: int = 100, 
+                 provider: str = "openai", 
+                 logger_metadata: Optional[Dict[str, Any]] = None, 
+                 partition_on: Optional[Literal["date"]] = "date",
+                 event_types: Optional[List[str]] = None):
         """
         Initialize the Parquet logger.
         
@@ -36,6 +43,11 @@ class ParquetLogger(BaseCallbackHandler):
             provider: LLM provider name (default: "openai")
             logger_metadata: Optional dictionary of metadata to include with all log entries
             partition_on: Partitioning strategy - "date" for daily partitions or None for no partitioning (default: "date")
+            event_types: List of event types to log. If None, logs only LLM events.
+                Available types: 'llm_start', 'llm_end', 'llm_error',
+                                'chain_start', 'chain_end', 'chain_error',
+                                'tool_start', 'tool_end', 'tool_error',
+                                'agent_action', 'agent_finish'
         """
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -43,6 +55,13 @@ class ParquetLogger(BaseCallbackHandler):
         self.provider = provider
         self.logger_metadata = logger_metadata or {}
         self.partition_on = partition_on
+        
+        # Set event types to log
+        if event_types is None:
+            # Default to LLM events only for backward compatibility
+            self.event_types: Set[str] = {'llm_start', 'llm_end', 'llm_error'}
+        else:
+            self.event_types: Set[str] = set(event_types)
         # Safely serialize metadata with fallback
         try:
             self.logger_metadata_json = json.dumps(self.logger_metadata, default=str)
@@ -106,6 +125,9 @@ class ParquetLogger(BaseCallbackHandler):
     
     def on_llm_start(self, serialized: Dict, prompts: List[str], **kwargs):
         """Log LLM start event with all request data in payload."""
+        if 'llm_start' not in self.event_types:
+            return
+            
         # Extract logger_custom_id from tags (persists through all events)
         logger_custom_id = self._extract_custom_id_from_tags(kwargs)
         
@@ -119,11 +141,13 @@ class ParquetLogger(BaseCallbackHandler):
             'tags': kwargs.get('tags', []),
             'metadata_dict': kwargs.get('metadata', {}),
             'tools': kwargs.get('tools', None),
+            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else None,
         }
         
         entry = {
             'timestamp': datetime.now(timezone.utc),
             'run_id': str(kwargs.get('run_id', '')),
+            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
             'logger_custom_id': logger_custom_id,
             'event_type': 'llm_start',
             'provider': self.provider,
@@ -134,6 +158,9 @@ class ParquetLogger(BaseCallbackHandler):
     
     def on_llm_end(self, response, **kwargs):
         """Log LLM completion event with all response data in payload."""
+        if 'llm_end' not in self.event_types:
+            return
+            
         # Extract logger_custom_id from tags (persists through all events)
         logger_custom_id = self._extract_custom_id_from_tags(kwargs)
         
@@ -169,6 +196,7 @@ class ParquetLogger(BaseCallbackHandler):
         entry = {
             'timestamp': datetime.now(timezone.utc),
             'run_id': str(kwargs.get('run_id', '')),
+            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
             'logger_custom_id': logger_custom_id,
             'event_type': 'llm_end',
             'provider': self.provider,
@@ -179,6 +207,9 @@ class ParquetLogger(BaseCallbackHandler):
     
     def on_llm_error(self, error, **kwargs):
         """Log LLM error event with error details in payload."""
+        if 'llm_error' not in self.event_types:
+            return
+            
         # Extract logger_custom_id from tags (persists through all events)
         logger_custom_id = self._extract_custom_id_from_tags(kwargs)
         
@@ -204,8 +235,253 @@ class ParquetLogger(BaseCallbackHandler):
         entry = {
             'timestamp': datetime.now(timezone.utc),
             'run_id': str(kwargs.get('run_id', '')),
+            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
             'logger_custom_id': logger_custom_id,
             'event_type': 'llm_error',
+            'provider': self.provider,
+            'logger_metadata': self.logger_metadata_json,
+            'payload': self._safe_json_dumps(payload_data)
+        }
+        self._add_entry(entry)
+    
+    def on_chain_start(self, serialized: Dict[str, Any], inputs: Dict[str, Any], **kwargs):
+        """Log chain start event."""
+        if 'chain_start' not in self.event_types:
+            return
+            
+        logger_custom_id = self._extract_custom_id_from_tags(kwargs)
+        
+        payload_data = {
+            'name': serialized.get('name', 'unknown'),
+            'inputs': inputs,
+            'serialized': serialized,
+            'metadata': kwargs,
+            'tags': kwargs.get('tags', []),
+            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else None,
+        }
+        
+        entry = {
+            'timestamp': datetime.now(timezone.utc),
+            'run_id': str(kwargs.get('run_id', '')),
+            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
+            'logger_custom_id': logger_custom_id,
+            'event_type': 'chain_start',
+            'provider': self.provider,
+            'logger_metadata': self.logger_metadata_json,
+            'payload': self._safe_json_dumps(payload_data)
+        }
+        self._add_entry(entry)
+    
+    def on_chain_end(self, outputs: Dict[str, Any], **kwargs):
+        """Log chain end event."""
+        if 'chain_end' not in self.event_types:
+            return
+            
+        logger_custom_id = self._extract_custom_id_from_tags(kwargs)
+        
+        payload_data = {
+            'outputs': outputs,
+            'metadata': kwargs,
+            'tags': kwargs.get('tags', []),
+            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else None,
+        }
+        
+        entry = {
+            'timestamp': datetime.now(timezone.utc),
+            'run_id': str(kwargs.get('run_id', '')),
+            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
+            'logger_custom_id': logger_custom_id,
+            'event_type': 'chain_end',
+            'provider': self.provider,
+            'logger_metadata': self.logger_metadata_json,
+            'payload': self._safe_json_dumps(payload_data)
+        }
+        self._add_entry(entry)
+    
+    def on_chain_error(self, error: Exception, **kwargs):
+        """Log chain error event."""
+        if 'chain_error' not in self.event_types:
+            return
+            
+        logger_custom_id = self._extract_custom_id_from_tags(kwargs)
+        
+        payload_data = {
+            'error': str(error),
+            'error_type': type(error).__name__,
+            'metadata': kwargs,
+            'tags': kwargs.get('tags', []),
+            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else None,
+        }
+        
+        # Add error details if available
+        if hasattr(error, '__dict__'):
+            payload_data['error_details'] = {k: str(v) for k, v in error.__dict__.items() 
+                                            if not k.startswith('_')}
+        
+        entry = {
+            'timestamp': datetime.now(timezone.utc),
+            'run_id': str(kwargs.get('run_id', '')),
+            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
+            'logger_custom_id': logger_custom_id,
+            'event_type': 'chain_error',
+            'provider': self.provider,
+            'logger_metadata': self.logger_metadata_json,
+            'payload': self._safe_json_dumps(payload_data)
+        }
+        self._add_entry(entry)
+    
+    def on_tool_start(self, serialized: Dict[str, Any], input_str: str, **kwargs):
+        """Log tool start event."""
+        if 'tool_start' not in self.event_types:
+            return
+            
+        logger_custom_id = self._extract_custom_id_from_tags(kwargs)
+        
+        payload_data = {
+            'name': serialized.get('name', 'unknown'),
+            'description': serialized.get('description', ''),
+            'input': input_str,
+            'serialized': serialized,
+            'metadata': kwargs,
+            'tags': kwargs.get('tags', []),
+            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else None,
+        }
+        
+        entry = {
+            'timestamp': datetime.now(timezone.utc),
+            'run_id': str(kwargs.get('run_id', '')),
+            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
+            'logger_custom_id': logger_custom_id,
+            'event_type': 'tool_start',
+            'provider': self.provider,
+            'logger_metadata': self.logger_metadata_json,
+            'payload': self._safe_json_dumps(payload_data)
+        }
+        self._add_entry(entry)
+    
+    def on_tool_end(self, output: str, **kwargs):
+        """Log tool end event."""
+        if 'tool_end' not in self.event_types:
+            return
+            
+        logger_custom_id = self._extract_custom_id_from_tags(kwargs)
+        
+        payload_data = {
+            'output': output,
+            'metadata': kwargs,
+            'tags': kwargs.get('tags', []),
+            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else None,
+        }
+        
+        entry = {
+            'timestamp': datetime.now(timezone.utc),
+            'run_id': str(kwargs.get('run_id', '')),
+            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
+            'logger_custom_id': logger_custom_id,
+            'event_type': 'tool_end',
+            'provider': self.provider,
+            'logger_metadata': self.logger_metadata_json,
+            'payload': self._safe_json_dumps(payload_data)
+        }
+        self._add_entry(entry)
+    
+    def on_tool_error(self, error: Exception, **kwargs):
+        """Log tool error event."""
+        if 'tool_error' not in self.event_types:
+            return
+            
+        logger_custom_id = self._extract_custom_id_from_tags(kwargs)
+        
+        payload_data = {
+            'error': str(error),
+            'error_type': type(error).__name__,
+            'metadata': kwargs,
+            'tags': kwargs.get('tags', []),
+            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else None,
+        }
+        
+        # Add error details if available
+        if hasattr(error, '__dict__'):
+            payload_data['error_details'] = {k: str(v) for k, v in error.__dict__.items() 
+                                            if not k.startswith('_')}
+        
+        entry = {
+            'timestamp': datetime.now(timezone.utc),
+            'run_id': str(kwargs.get('run_id', '')),
+            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
+            'logger_custom_id': logger_custom_id,
+            'event_type': 'tool_error',
+            'provider': self.provider,
+            'logger_metadata': self.logger_metadata_json,
+            'payload': self._safe_json_dumps(payload_data)
+        }
+        self._add_entry(entry)
+    
+    def on_agent_action(self, action, **kwargs):
+        """Log agent action event."""
+        if 'agent_action' not in self.event_types:
+            return
+            
+        logger_custom_id = self._extract_custom_id_from_tags(kwargs)
+        
+        # Handle AgentAction object
+        if hasattr(action, '__dict__'):
+            action_data = {
+                'tool': getattr(action, 'tool', ''),
+                'tool_input': getattr(action, 'tool_input', ''),
+                'log': getattr(action, 'log', ''),
+            }
+        else:
+            action_data = str(action)
+        
+        payload_data = {
+            'action': action_data,
+            'metadata': kwargs,
+            'tags': kwargs.get('tags', []),
+            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else None,
+        }
+        
+        entry = {
+            'timestamp': datetime.now(timezone.utc),
+            'run_id': str(kwargs.get('run_id', '')),
+            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
+            'logger_custom_id': logger_custom_id,
+            'event_type': 'agent_action',
+            'provider': self.provider,
+            'logger_metadata': self.logger_metadata_json,
+            'payload': self._safe_json_dumps(payload_data)
+        }
+        self._add_entry(entry)
+    
+    def on_agent_finish(self, finish, **kwargs):
+        """Log agent finish event."""
+        if 'agent_finish' not in self.event_types:
+            return
+            
+        logger_custom_id = self._extract_custom_id_from_tags(kwargs)
+        
+        # Handle AgentFinish object
+        if hasattr(finish, '__dict__'):
+            finish_data = {
+                'return_values': getattr(finish, 'return_values', {}),
+                'log': getattr(finish, 'log', ''),
+            }
+        else:
+            finish_data = str(finish)
+        
+        payload_data = {
+            'finish': finish_data,
+            'metadata': kwargs,
+            'tags': kwargs.get('tags', []),
+            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else None,
+        }
+        
+        entry = {
+            'timestamp': datetime.now(timezone.utc),
+            'run_id': str(kwargs.get('run_id', '')),
+            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
+            'logger_custom_id': logger_custom_id,
+            'event_type': 'agent_finish',
             'provider': self.provider,
             'logger_metadata': self.logger_metadata_json,
             'payload': self._safe_json_dumps(payload_data)
@@ -234,6 +510,8 @@ class ParquetLogger(BaseCallbackHandler):
             ts = pa.array([e["timestamp"] for e in self.buffer],
                           type=pa.timestamp("us", tz="UTC"))
             run_id = pa.array([e["run_id"] for e in self.buffer], type=pa.string())
+            # Handle backward compatibility - entries may not have parent_run_id
+            parent_run_id = pa.array([e.get("parent_run_id", "") for e in self.buffer], type=pa.string())
             logger_custom_id = pa.array([e["logger_custom_id"] for e in self.buffer], type=pa.string())
             event_type = pa.array([e["event_type"] for e in self.buffer], type=pa.string())
             provider = pa.array([e["provider"] for e in self.buffer], type=pa.string())
@@ -242,7 +520,7 @@ class ParquetLogger(BaseCallbackHandler):
             
             # Create table with explicit schema
             table = pa.Table.from_arrays(
-                [ts, run_id, logger_custom_id, event_type, provider, logger_metadata, payload],
+                [ts, run_id, parent_run_id, logger_custom_id, event_type, provider, logger_metadata, payload],
                 schema=SCHEMA
             )
             
