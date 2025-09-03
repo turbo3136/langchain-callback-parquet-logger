@@ -1,21 +1,31 @@
 # LangChain Callback Parquet Logger
 
-A high-performance callback handler for logging LangChain LLM interactions to Parquet files with automatic partitioning, buffering, and batch processing support.
+A high-performance callback handler for logging LangChain interactions to Parquet files with standardized payload structure.
 
 ## Features
 
 - 📊 **Parquet Format**: Efficient columnar storage for analytics
+- 🎯 **Standardized Structure**: Consistent payload format across all event types (v1.0.0+)
 - 🚀 **Buffered Writing**: Configurable buffer size for optimal performance
-- 📅 **Partitioning**: Optional daily partitioning for better organization
+- 📅 **Auto-Partitioning**: Daily partitioning for better data organization
 - 🏷️ **Custom Tracking**: Add custom IDs and metadata to your logs
-- 🔄 **Batch Processing**: Simple helper for DataFrame batch operations
-- ☁️ **S3 Upload**: Optional S3 upload for ephemeral environments
-- 🔒 **Thread-Safe**: Safe for concurrent LLM calls
+- 🔄 **Batch Processing**: Process DataFrames through LLMs efficiently
+- ☁️ **S3 Upload**: Optional S3 upload for cloud storage
+- 🔍 **Complete Event Support**: LLM, Chain, Tool, and Agent events
 
 ## Installation
 
 ```bash
 pip install langchain-callback-parquet-logger
+```
+
+With optional features:
+```bash
+# S3 support
+pip install "langchain-callback-parquet-logger[s3]"
+
+# Background retrieval support
+pip install "langchain-callback-parquet-logger[background]"
 ```
 
 ## Quick Start
@@ -53,25 +63,37 @@ logger = ParquetLogger(
     log_dir="./logs",
     logger_metadata={
         "environment": "production",
-        "service": "api-gateway",
-        "version": "2.1.0"
+        "service": "api-gateway"
     }
 )
 
-# Request-level tracking with custom IDs
+# Request-level tracking
 llm = ChatOpenAI(model="gpt-4o-mini", callbacks=[logger])
 response = llm.invoke(
     "What is quantum computing?",
-    config=with_tags(
-        custom_id="user-123-req-456",
-        tags=["production", "high-priority"]
-    )
+    config=with_tags(custom_id="user-123-req-456")
 )
 ```
 
-### 3. Batch Processing (v0.3.0+)
+### 3. Event Type Selection
 
-Process DataFrames through LLMs with minimal code:
+```python
+# Log all event types (v1.0.0+)
+logger = ParquetLogger(
+    './logs',
+    event_types=['llm_start', 'llm_end', 'llm_error',
+                 'chain_start', 'chain_end', 'chain_error',
+                 'tool_start', 'tool_end', 'tool_error',
+                 'agent_action', 'agent_finish']
+)
+
+# Default: Only LLM events for backward compatibility
+logger = ParquetLogger('./logs')  # Only llm_start, llm_end, llm_error
+```
+
+### 4. Batch Processing
+
+Process DataFrames through LLMs efficiently:
 
 ```python
 import pandas as pd
@@ -87,98 +109,121 @@ df = pd.DataFrame({
 df['prompt'] = df['question']
 df['config'] = df['id'].apply(lambda x: with_tags(custom_id=x))
 
-# Configure LLM with advanced features
+# Run batch processing
 with ParquetLogger('./logs') as logger:
-    llm = ChatOpenAI(
-        model="gpt-4o-mini",
-        service_tier="flex",  # Optional: optimize costs
-        model_kwargs={"background": True},  # Optional: background processing
-        callbacks=[logger]
-    )
-    
-    # Run batch processing
-    results = await batch_run(df, llm, max_concurrency=10, show_progress=True)
+    llm = ChatOpenAI(model="gpt-4o-mini", callbacks=[logger])
+    results = await batch_run(df, llm, max_concurrency=10)
     df['answer'] = results
 ```
 
-See [examples/batch_processing.py](examples/batch_processing.py) for advanced usage with structured outputs, web search tools, and more.
+### 5. S3 Upload
 
-#### Memory-Efficient Mode for Huge DataFrames
-
-For massive DataFrames, use `return_results=False` to avoid keeping results in memory:
+For cloud storage and ephemeral environments:
 
 ```python
-# Process huge DataFrame without memory overhead
-with ParquetLogger('./logs') as logger:
-    llm = ChatOpenAI(model="gpt-4o-mini", callbacks=[logger])
-    
-    # Results saved to parquet only, not kept in memory
-    await batch_run(huge_df, llm, return_results=False)
-    
-# Read results later from parquet files
-df_logs = pd.read_parquet('./logs')
-results = df_logs[df_logs['event_type'] == 'llm_end']
-```
-
-### 4. S3 Upload Support (v0.6.0+)
-
-Upload logs directly to S3 for persistent storage in ephemeral environments (e.g., Hex.tech scheduled runs):
-
-```python
-from langchain_callback_parquet_logger import ParquetLogger
-from langchain_openai import ChatOpenAI
-
-# For Hex.tech scheduled runs or other ephemeral environments
 logger = ParquetLogger(
     log_dir="./logs",
     s3_bucket="my-llm-logs",
-    s3_prefix="hex-runs/",
-    s3_on_failure="error",  # Fail fast to avoid data loss
-    buffer_size=10  # Flush frequently
+    s3_prefix="runs/",
+    s3_on_failure="error"  # Fail fast for production
 )
-
-llm = ChatOpenAI(model="gpt-4o-mini", callbacks=[logger])
-response = llm.invoke("Hello!")
 ```
 
-#### S3 Configuration
+## Standardized Payload Structure (v1.0.0+)
 
-Install with S3 support:
-```bash
-pip install "langchain-callback-parquet-logger[s3]"
-```
+All events now use a consistent structure for easier processing:
 
-Authentication uses boto3's standard credential chain:
-- Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
-- IAM roles (for EC2/ECS/Lambda)
-- AWS credentials file (`~/.aws/credentials`)
-
-#### Usage Examples
-
-**Production (Hex.tech scheduled runs):**
 ```python
-# Fail fast on S3 errors to avoid data loss
-logger = ParquetLogger(
-    log_dir="./logs",
-    s3_bucket="prod-llm-logs",
-    s3_prefix=f"runs/{datetime.now():%Y-%m-%d}/",
-    s3_on_failure="error",  # Raises exception on S3 failure
-    buffer_size=10  # Smaller buffer for frequent uploads
-)
+{
+    "event_type": "llm_start",
+    "event_phase": "start",      # start/end/error/action/finish
+    "event_component": "llm",    # llm/chain/tool/agent
+    "timestamp": "2024-01-15T10:30:00Z",
+    
+    "execution": {
+        "run_id": "uuid-string",
+        "parent_run_id": "",      # Empty string if no parent
+        "tags": [],
+        "metadata": {},
+        "custom_id": ""
+    },
+    
+    "data": {
+        "inputs": {               # All input data
+            "prompts": [],        # LLM prompts
+            "messages": [],       # Chat messages
+            "inputs": {},         # Chain/tool inputs
+            "input_str": "",      # Tool input string
+            "action": {},         # Agent action
+            "serialized": {}      # Serialized component
+        },
+        "outputs": {              # All output data
+            "response": {},       # LLM response
+            "outputs": {},        # Chain outputs
+            "output": "",         # Tool output
+            "finish": {},         # Agent finish
+            "usage": {}           # Token usage
+        },
+        "error": {                # Error information
+            "message": "",
+            "type": "",
+            "details": {},
+            "traceback": []
+        },
+        "config": {               # Configuration
+            "invocation_params": {},
+            "model": "",
+            "tools": [],
+            "response_metadata": {}
+        }
+    },
+    
+    "raw": {                      # Complete raw data
+        "kwargs": {},             # Full kwargs dict
+        "primary_args": {}        # Main positional args
+    }
+}
 ```
 
-**Development:**
+## Reading Logs
+
+### Basic Reading
 ```python
-# Continue on S3 errors during development
-logger = ParquetLogger(
-    log_dir="./logs",
-    s3_bucket=os.getenv("S3_BUCKET"),  # Optional S3
-    s3_on_failure="continue",  # Just log errors
-    buffer_size=100  # Larger buffer for efficiency
-)
+import pandas as pd
+import json
+
+# Read all logs
+df = pd.read_parquet("./logs")
+
+# Parse standardized payload (v1.0.0+)
+for idx, row in df.iterrows():
+    payload = json.loads(row['payload'])
+    
+    # Access standardized fields
+    event_type = payload['event_type']
+    prompts = payload['data']['inputs']['prompts']
+    response = payload['data']['outputs']['response']
+    usage = payload['data']['outputs']['usage']
+    error_msg = payload['data']['error']['message']
 ```
 
-Files are always written locally first, then uploaded to S3. The S3 structure mirrors the local directory structure with the configured prefix.
+### Query with DuckDB
+```python
+import duckdb
+
+conn = duckdb.connect()
+df = conn.execute("""
+    SELECT 
+        logger_custom_id,
+        event_type,
+        timestamp,
+        json_extract_string(payload, '$.data.outputs.usage.total_tokens') as tokens,
+        json_extract_string(payload, '$.data.config.model') as model
+    FROM read_parquet('./logs/**/*.parquet')
+    WHERE event_type = 'llm_end'
+    ORDER BY timestamp DESC
+""").df()
+```
 
 ## Configuration Options
 
@@ -190,57 +235,11 @@ Files are always written locally first, then uploaded to S3. The S3 structure mi
 | `buffer_size` | int | 100 | Entries before auto-flush |
 | `provider` | str | "openai" | LLM provider name |
 | `logger_metadata` | dict | {} | Metadata for all logs |
-| `partition_on` | str/None | "date" | "date" or None for no partitioning |
-| `event_types` | list/None | None | Event types to log (defaults to LLM events) |
-| `s3_bucket` | str/None | None | S3 bucket name (enables S3 when set) |
-| `s3_prefix` | str | "langchain-logs/" | Prefix/folder in S3 bucket |
-| `s3_on_failure` | str | "error" | "error" or "continue" on S3 failures |
-| `s3_retry_attempts` | int | 3 | Number of retry attempts for S3 |
-
-### batch_run Parameters
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `df` | DataFrame | required | DataFrame with data |
-| `llm` | LangChain LLM | required | Configured LLM instance |
-| `prompt_col` | str | "prompt" | Column with prompts |
-| `config_col` | str | "config" | Column with config dicts |
-| `tools_col` | str/None | "tools" | Column with tools lists |
-| `max_concurrency` | int | 10 | Max parallel requests |
-| `show_progress` | bool | True | Show progress bar |
-| `return_results` | bool | True | If False, don't keep results in memory |
-
-## Reading Logs
-
-### With Pandas
-```python
-import pandas as pd
-import json
-
-df = pd.read_parquet("./logs")
-df['data'] = df['payload'].apply(json.loads)
-
-# Analyze by custom ID
-custom_requests = df[df['logger_custom_id'] != '']
-print(f"Found {len(custom_requests)} tagged requests")
-```
-
-### With DuckDB
-```python
-import duckdb
-
-conn = duckdb.connect()
-df = conn.execute("""
-    SELECT 
-        logger_custom_id,
-        event_type,
-        timestamp,
-        json_extract_string(payload, '$.usage.total_tokens') as tokens
-    FROM read_parquet('./logs/**/*.parquet')
-    WHERE logger_custom_id != ''
-    ORDER BY timestamp DESC
-""").df()
-```
+| `partition_on` | str/None | "date" | "date" or None |
+| `event_types` | list | ['llm_start', 'llm_end', 'llm_error'] | Events to log |
+| `s3_bucket` | str/None | None | S3 bucket name |
+| `s3_prefix` | str | "langchain-logs/" | S3 prefix |
+| `s3_on_failure` | str | "error" | "error" or "continue" |
 
 ## Log Schema
 
@@ -248,78 +247,41 @@ df = conn.execute("""
 |--------|------|-------------|
 | `timestamp` | timestamp | Event time (UTC) |
 | `run_id` | string | Unique run ID |
-| `parent_run_id` | string | Parent run ID for hierarchy tracking |
-| `logger_custom_id` | string | Your custom ID |
-| `event_type` | string | Event type (llm_start, chain_end, etc.) |
+| `parent_run_id` | string | Parent run ID (hierarchy tracking) |
+| `logger_custom_id` | string | Your custom tracking ID |
+| `event_type` | string | Event type |
 | `provider` | string | LLM provider |
 | `logger_metadata` | string | JSON metadata |
-| `payload` | string | JSON event data |
+| `payload` | string | Standardized JSON payload (v1.0.0+) |
 
-## Important Notes
+## Breaking Changes in v1.0.0
 
-### Notebook Usage
-In Jupyter/Colab, use one of these approaches for immediate writes:
-- **Context manager** (recommended): `with ParquetLogger() as logger:`
-- **Small buffer**: `ParquetLogger(buffer_size=1)`
-- **Manual flush**: `logger.flush()`
+The payload structure has been completely standardized. If upgrading from earlier versions:
 
-### File Organization
-```
-logs/
-├── date=2024-01-15/          # With partitioning (default)
-│   └── logs_143022_123456.parquet
-└── date=2024-01-16/
-    └── logs_090122_345678.parquet
-```
-
-## Background Response Retrieval (v0.4.0+)
-
-Retrieve completed responses from OpenAI's background/async requests:
-
+**Old structure (pre-v1.0.0):**
 ```python
-import pandas as pd
-import openai
-from langchain_callback_parquet_logger import retrieve_background_responses, ParquetLogger
-
-# DataFrame with response IDs from background requests
-df = pd.DataFrame({
-    'response_id': ['resp_123...', 'resp_456...'],
-    'logger_custom_id': ['user-001', 'user-002']
-})
-
-# Retrieve and log responses
-client = openai.AsyncClient()
-with ParquetLogger('./retrieval_logs') as logger:
-    results = await retrieve_background_responses(
-        df,
-        client,
-        logger=logger,
-        show_progress=True,
-        checkpoint_file='./checkpoint.parquet'  # Resume capability
-    )
+payload = json.loads(row['payload'])
+prompts = payload.get('prompts', [])  # Direct access, inconsistent
 ```
 
-### Features
-- **Automatic rate limiting** with exponential backoff
-- **Checkpoint/resume** for interrupted retrievals
-- **Memory-efficient mode** with `return_results=False`
-- **Progress tracking** with tqdm
-- **Structured logging** of attempts, completions, and errors
+**New structure (v1.0.0+):**
+```python
+payload = json.loads(row['payload'])
+prompts = payload['data']['inputs']['prompts']  # Nested, consistent
+```
 
-See [examples/retrieve_background_responses.py](examples/retrieve_background_responses.py) for detailed usage.
+All fields now have non-null defaults, making processing more predictable.
 
 ## Examples
 
-- [`basic_usage.py`](examples/basic_usage.py) - Simple logging example
-- [`batch_processing.py`](examples/batch_processing.py) - Advanced batch processing with all features
-- [`simple_batch_example.py`](examples/simple_batch_example.py) - Before/after batch processing comparison
-- [`memory_efficient_batch.py`](examples/memory_efficient_batch.py) - Memory-efficient processing for huge DataFrames
-- [`partitioning_example.py`](examples/partitioning_example.py) - Partitioning strategies
-- [`retrieve_background_responses.py`](examples/retrieve_background_responses.py) - Background response retrieval
+- [`basic_usage.py`](examples/basic_usage.py) - Simple logging
+- [`batch_processing.py`](examples/batch_processing.py) - Batch operations
+- [`memory_efficient_batch.py`](examples/memory_efficient_batch.py) - Large DataFrame processing
+- [`retrieve_background_responses.py`](examples/retrieve_background_responses.py) - Background retrieval
 
 ## License
 
-MIT License - see LICENSE file
+MIT License
 
 ## Contributing
 
