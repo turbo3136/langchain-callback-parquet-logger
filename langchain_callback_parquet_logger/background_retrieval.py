@@ -95,7 +95,7 @@ async def retrieve_background_responses(
                     from tqdm import tqdm
             except ImportError:
                 from tqdm import tqdm
-            progress_bar = tqdm(total=len(df), desc="Retrieving responses")
+            progress_bar = tqdm(total=len(df), desc="Retrieving responses", position=0, leave=True)
         except ImportError:
             print(f"Retrieving {len(df)} responses...")
     
@@ -132,6 +132,8 @@ async def retrieve_background_responses(
         
         # Skip if already processed
         if response_id in processed_ids:
+            if progress_bar:
+                progress_bar.update(1)
             if return_results:
                 return {
                     'response_id': response_id,
@@ -291,6 +293,9 @@ async def retrieve_background_responses(
                 failed_ids[response_id] = error_msg
                 processed_ids.add(response_id)
                 
+                if progress_bar:
+                    progress_bar.update(1)
+                
                 if return_results:
                     results.append({
                         'response_id': response_id,
@@ -313,14 +318,14 @@ async def retrieve_background_responses(
         if checkpoint_file and len(checkpoint_batch) >= 100:
             save_checkpoint(checkpoint_file, checkpoint_batch)
             checkpoint_batch = []
-        
-        # Flush logger buffer if needed
-        if logger and hasattr(logger, 'flush'):
-            logger.flush()
     
     # Final checkpoint save
     if checkpoint_file and checkpoint_batch:
         save_checkpoint(checkpoint_file, checkpoint_batch)
+    
+    # Final flush of logger buffer
+    if logger and hasattr(logger, 'flush'):
+        logger.flush()
     
     # Clean up
     if progress_bar:
