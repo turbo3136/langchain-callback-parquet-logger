@@ -13,6 +13,7 @@ from langchain_callback_parquet_logger import ParquetLogger
 class TestS3Integration:
     """Test S3 upload functionality."""
     
+    @patch('langchain_callback_parquet_logger.logger.HAS_BOTO3', True)
     @patch('langchain_callback_parquet_logger.logger.boto3')
     def test_s3_upload_success(self, mock_boto3, mock_llm):
         """Test successful S3 upload."""
@@ -44,6 +45,7 @@ class TestS3Integration:
             assert call_args['Key'].startswith("test-prefix/")
             assert isinstance(call_args['Body'], bytes)
     
+    @patch('langchain_callback_parquet_logger.logger.HAS_BOTO3', True)
     @patch('langchain_callback_parquet_logger.logger.boto3')
     def test_s3_upload_with_retry(self, mock_boto3, mock_llm):
         """Test S3 upload with retry on failure."""
@@ -75,6 +77,7 @@ class TestS3Integration:
             # Verify S3 upload was retried 3 times
             assert mock_s3_client.put_object.call_count == 3
     
+    @patch('langchain_callback_parquet_logger.logger.HAS_BOTO3', True)
     @patch('langchain_callback_parquet_logger.logger.boto3')
     def test_s3_upload_failure_error_mode(self, mock_boto3, mock_llm):
         """Test S3 upload failure in error mode."""
@@ -100,6 +103,7 @@ class TestS3Integration:
                     run_id="test-run-id"
                 )
     
+    @patch('langchain_callback_parquet_logger.logger.HAS_BOTO3', True)
     @patch('langchain_callback_parquet_logger.logger.boto3')
     def test_s3_upload_failure_continue_mode(self, mock_boto3, mock_llm, capsys):
         """Test S3 upload failure in continue mode."""
@@ -164,6 +168,7 @@ class TestS3Integration:
                         s3_bucket="test-bucket"
                     )
     
+    @patch('langchain_callback_parquet_logger.logger.HAS_BOTO3', True)
     @patch('langchain_callback_parquet_logger.logger.boto3')
     def test_s3_key_structure_with_partitioning(self, mock_boto3, mock_llm):
         """Test S3 key structure with date partitioning."""
@@ -191,6 +196,7 @@ class TestS3Integration:
             assert key.startswith("logs/date=")
             assert ".parquet" in key
     
+    @patch('langchain_callback_parquet_logger.logger.HAS_BOTO3', True)
     @patch('langchain_callback_parquet_logger.logger.boto3')
     def test_s3_key_structure_without_partitioning(self, mock_boto3, mock_llm):
         """Test S3 key structure without partitioning."""
