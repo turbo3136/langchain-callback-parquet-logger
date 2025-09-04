@@ -59,7 +59,7 @@ async def process_dataframe(
         logger_config.update({
             "s3_bucket": s3_bucket,
             "s3_prefix": "batch-runs/",
-            "s3_on_failure": "error"  # Fail fast in production
+            "s3_on_failure": "continue"  # Fail gracefully if S3 not configured
         })
     
     # Process with context manager
@@ -165,8 +165,8 @@ async def main():
     
     # Simulate large dataset
     df_large = pd.DataFrame({
-        'doc_id': [f'DOC-{i:05d}' for i in range(100)],
-        'prompt': [f'Summarize document {i}: [long text here...]' for i in range(100)]
+        'doc_id': [f'DOC-{i:05d}' for i in range(10)],
+        'prompt': [f'Summarize document {i}: [long text here...]' for i in range(10)]
     })
     
     await process_dataframe(
@@ -190,9 +190,9 @@ async def main():
     print("Example 3: With S3 Upload (if configured)")
     print("=" * 60)
     
-    # Check if S3 is configured
+    # Check if user wants S3 (by setting S3_BUCKET env var)
     import os
-    if os.getenv('AWS_ACCESS_KEY_ID'):
+    if os.getenv('S3_BUCKET'):
         df_s3 = pd.DataFrame({
             'task_id': ['T001', 'T002'],
             'prompt': ['Hello world', 'Goodbye world']
@@ -202,11 +202,12 @@ async def main():
             df_s3,
             custom_id_column='task_id',
             log_dir="./example3_logs",
-            s3_bucket=os.getenv('S3_BUCKET', 'my-llm-logs'),
+            s3_bucket=os.getenv('S3_BUCKET'),
             logger_metadata={'environment': 'production'}
         )
+        print("Note: S3 upload will fail gracefully if AWS credentials not configured")
     else:
-        print("Skipping S3 example (AWS credentials not configured)")
+        print("Skipping S3 example (S3_BUCKET env var not set)")
 
 
 if __name__ == "__main__":
