@@ -152,306 +152,309 @@ class ParquetLogger(BaseCallbackHandler):
         
         return json.dumps(obj, default=default)
     
-    def on_llm_start(self, serialized: Dict, prompts: List[str], **kwargs):
-        """Log LLM start event with all request data in payload."""
-        if 'llm_start' not in self.event_types:
-            return
+    def _create_standard_payload(self, event_type: str, **kwargs) -> Dict[str, Any]:
+        """Create standardized payload structure with all sections initialized."""
+        # Parse event type to determine component and phase
+        parts = event_type.replace('_', ' ').split()
+        if len(parts) >= 2:
+            component = parts[0]  # llm, chain, tool, agent
+            phase = parts[1]  # start, end, error, action, finish
+        else:
+            # Handle single-word events like agent_action -> agent action
+            component = parts[0] if parts[0] in ['agent'] else event_type
+            phase = 'action' if 'action' in event_type else 'finish' if 'finish' in event_type else ''
+        
+        # Build standard structure with all fields initialized to non-null defaults
+        return {
+            "event_type": event_type,
+            "event_phase": phase,
+            "event_component": component,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             
-        # Extract logger_custom_id from tags (persists through all events)
-        logger_custom_id = self._extract_custom_id_from_tags(kwargs)
-        
-        payload_data = {
-            'model': serialized.get('kwargs', {}).get('model_name', 'unknown'),
-            'prompts': prompts,
-            'serialized': serialized,
-            'metadata': kwargs,
-            # Include specific fields that might be present
-            'invocation_params': serialized.get('kwargs', {}),
-            'tags': kwargs.get('tags', []),
-            'metadata_dict': kwargs.get('metadata', {}),
-            'tools': kwargs.get('tools', None),
-            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else None,
+            "execution": {
+                "run_id": str(kwargs.get('run_id', '')),
+                "parent_run_id": str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
+                "tags": kwargs.get('tags', []) or [],
+                "metadata": kwargs.get('metadata', {}) or {},
+                "custom_id": self._extract_custom_id_from_tags(kwargs)
+            },
+            
+            "data": {
+                "inputs": {
+                    "prompts": [],
+                    "messages": [],
+                    "inputs": {},
+                    "input_str": "",
+                    "action": {},
+                    "serialized": {}
+                },
+                "outputs": {
+                    "response": {},
+                    "outputs": {},
+                    "output": "",
+                    "finish": {},
+                    "usage": {}
+                },
+                "error": {
+                    "message": "",
+                    "type": "",
+                    "details": {},
+                    "traceback": []
+                },
+                "config": {
+                    "invocation_params": {},
+                    "model": "",
+                    "tools": [],
+                    "response_metadata": {}
+                }
+            },
+            
+            "raw": {
+                "kwargs": kwargs.copy(),
+                "primary_args": {}
+            }
         }
+    
+    def _add_error_info(self, payload: Dict[str, Any], error: Exception) -> None:
+        """Add standardized error information to payload."""
+        payload["data"]["error"]["message"] = str(error)
+        payload["data"]["error"]["type"] = type(error).__name__
         
+        if hasattr(error, '__dict__'):
+            payload["data"]["error"]["details"] = {
+                k: str(v) for k, v in error.__dict__.items() 
+                if not k.startswith('_')
+            }
+        
+        if hasattr(error, '__traceback__'):
+            import traceback
+            payload["data"]["error"]["traceback"] = traceback.format_tb(error.__traceback__)
+    
+    def _convert_response(self, response: Any) -> Dict[str, Any]:
+        """Convert LangChain response to dict format."""
+        try:
+            if hasattr(response, 'dict'):
+                return response.dict()
+            elif hasattr(response, 'to_dict'):
+                return response.to_dict()
+            elif isinstance(response, dict):
+                return response
+            else:
+                return {'content': str(response)}
+        except Exception as e:
+            return {'content': str(response), 'conversion_error': str(e)}
+    
+    def _log_event(self, payload: Dict[str, Any]) -> None:
+        """Create entry and add to buffer."""
         entry = {
             'timestamp': datetime.now(timezone.utc),
-            'run_id': str(kwargs.get('run_id', '')),
-            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
-            'logger_custom_id': logger_custom_id,
-            'event_type': 'llm_start',
+            'run_id': payload["execution"]["run_id"],
+            'parent_run_id': payload["execution"]["parent_run_id"],
+            'logger_custom_id': payload["execution"]["custom_id"],
+            'event_type': payload["event_type"],
             'provider': self.provider,
             'logger_metadata': self.logger_metadata_json,
-            'payload': self._safe_json_dumps(payload_data)
+            'payload': self._safe_json_dumps(payload)
         }
         self._add_entry(entry)
     
-    def on_llm_end(self, response, **kwargs):
-        """Log LLM completion event with all response data in payload."""
-        if 'llm_end' not in self.event_types:
+    def on_llm_start(self, serialized: Dict, prompts: List[str], **kwargs):
+        """Log LLM start event with standardized payload."""
+        if 'llm_start' not in self.event_types:
             return
-            
-        # Extract logger_custom_id from tags (persists through all events)
-        logger_custom_id = self._extract_custom_id_from_tags(kwargs)
         
-        # Convert response to dict (handles all LangChain response types)
-        try:
-            if hasattr(response, 'dict'):
-                response_data = response.dict()
-            elif hasattr(response, 'to_dict'):
-                response_data = response.to_dict()
-            else:
-                response_data = {'content': str(response)}
-        except Exception as e:
-            response_data = {'content': str(response), 'conversion_error': str(e)}
+        # Create standard payload
+        payload = self._create_standard_payload('llm_start', **kwargs)
         
-        # Extract key fields if available
-        payload_data = {
-            'response': response_data,
-            'metadata': kwargs,
-            'run_id': str(kwargs.get('run_id', '')),
-            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else None,
-            'tags': kwargs.get('tags', []),
+        # Add event-specific data
+        payload["data"]["inputs"]["prompts"] = prompts
+        payload["data"]["inputs"]["serialized"] = serialized
+        payload["data"]["config"]["model"] = serialized.get('kwargs', {}).get('model_name', '')
+        payload["data"]["config"]["invocation_params"] = serialized.get('kwargs', {})
+        payload["data"]["config"]["tools"] = kwargs.get('tools', []) or []
+        
+        # Handle messages if present (for chat models)
+        if 'messages' in kwargs:
+            payload["data"]["inputs"]["messages"] = kwargs['messages']
+        
+        # Preserve raw args
+        payload["raw"]["primary_args"] = {
+            "serialized": serialized,
+            "prompts": prompts
         }
         
-        # Add token usage if available
+        # Log the event
+        self._log_event(payload)
+    
+    def on_llm_end(self, response, **kwargs):
+        """Log LLM end event with standardized payload."""
+        if 'llm_end' not in self.event_types:
+            return
+        
+        # Create standard payload
+        payload = self._create_standard_payload('llm_end', **kwargs)
+        
+        # Convert response to dict
+        response_data = self._convert_response(response)
+        
+        # Add event-specific data
+        payload["data"]["outputs"]["response"] = response_data
+        
+        # Extract token usage if available
         if hasattr(response, 'llm_output') and response.llm_output:
-            payload_data['usage'] = response.llm_output.get('token_usage', {})
-            payload_data['model_name'] = response.llm_output.get('model_name', '')
+            payload["data"]["outputs"]["usage"] = response.llm_output.get('token_usage', {})
+            payload["data"]["config"]["model"] = response.llm_output.get('model_name', '')
         
         # Add response metadata if available
         if hasattr(response, 'response_metadata'):
-            payload_data['response_metadata'] = response.response_metadata
+            payload["data"]["config"]["response_metadata"] = response.response_metadata
         
-        entry = {
-            'timestamp': datetime.now(timezone.utc),
-            'run_id': str(kwargs.get('run_id', '')),
-            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
-            'logger_custom_id': logger_custom_id,
-            'event_type': 'llm_end',
-            'provider': self.provider,
-            'logger_metadata': self.logger_metadata_json,
-            'payload': self._safe_json_dumps(payload_data)
-        }
-        self._add_entry(entry)
+        # Preserve raw args
+        payload["raw"]["primary_args"] = {"response": response_data}
+        
+        # Log the event
+        self._log_event(payload)
     
     def on_llm_error(self, error, **kwargs):
-        """Log LLM error event with error details in payload."""
+        """Log LLM error event with standardized payload."""
         if 'llm_error' not in self.event_types:
             return
-            
-        # Extract logger_custom_id from tags (persists through all events)
-        logger_custom_id = self._extract_custom_id_from_tags(kwargs)
         
-        payload_data = {
-            'error': str(error),
-            'error_type': type(error).__name__,
-            'metadata': kwargs,
-            'run_id': str(kwargs.get('run_id', '')),
-            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else None,
-            'tags': kwargs.get('tags', []),
-        }
+        # Create standard payload
+        payload = self._create_standard_payload('llm_error', **kwargs)
         
-        # Add error details if available
-        if hasattr(error, '__dict__'):
-            payload_data['error_details'] = {k: str(v) for k, v in error.__dict__.items() 
-                                            if not k.startswith('_')}
+        # Add error information
+        self._add_error_info(payload, error)
         
-        # Add traceback if available
-        if hasattr(error, '__traceback__'):
-            import traceback
-            payload_data['traceback'] = traceback.format_tb(error.__traceback__)
+        # Preserve raw args
+        payload["raw"]["primary_args"] = {"error": str(error)}
         
-        entry = {
-            'timestamp': datetime.now(timezone.utc),
-            'run_id': str(kwargs.get('run_id', '')),
-            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
-            'logger_custom_id': logger_custom_id,
-            'event_type': 'llm_error',
-            'provider': self.provider,
-            'logger_metadata': self.logger_metadata_json,
-            'payload': self._safe_json_dumps(payload_data)
-        }
-        self._add_entry(entry)
+        # Log the event
+        self._log_event(payload)
     
     def on_chain_start(self, serialized: Dict[str, Any], inputs: Dict[str, Any], **kwargs):
-        """Log chain start event."""
+        """Log chain start event with standardized payload."""
         if 'chain_start' not in self.event_types:
             return
-            
-        logger_custom_id = self._extract_custom_id_from_tags(kwargs)
         
-        payload_data = {
-            'name': serialized.get('name', 'unknown'),
-            'inputs': inputs,
-            'serialized': serialized,
-            'metadata': kwargs,
-            'tags': kwargs.get('tags', []),
-            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else None,
+        # Create standard payload
+        payload = self._create_standard_payload('chain_start', **kwargs)
+        
+        # Add event-specific data
+        payload["data"]["inputs"]["inputs"] = inputs
+        payload["data"]["inputs"]["serialized"] = serialized
+        payload["data"]["config"]["model"] = serialized.get('name', '')
+        
+        # Preserve raw args
+        payload["raw"]["primary_args"] = {
+            "serialized": serialized,
+            "inputs": inputs
         }
         
-        entry = {
-            'timestamp': datetime.now(timezone.utc),
-            'run_id': str(kwargs.get('run_id', '')),
-            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
-            'logger_custom_id': logger_custom_id,
-            'event_type': 'chain_start',
-            'provider': self.provider,
-            'logger_metadata': self.logger_metadata_json,
-            'payload': self._safe_json_dumps(payload_data)
-        }
-        self._add_entry(entry)
+        # Log the event
+        self._log_event(payload)
     
     def on_chain_end(self, outputs: Dict[str, Any], **kwargs):
-        """Log chain end event."""
+        """Log chain end event with standardized payload."""
         if 'chain_end' not in self.event_types:
             return
-            
-        logger_custom_id = self._extract_custom_id_from_tags(kwargs)
         
-        payload_data = {
-            'outputs': outputs,
-            'metadata': kwargs,
-            'tags': kwargs.get('tags', []),
-            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else None,
-        }
+        # Create standard payload
+        payload = self._create_standard_payload('chain_end', **kwargs)
         
-        entry = {
-            'timestamp': datetime.now(timezone.utc),
-            'run_id': str(kwargs.get('run_id', '')),
-            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
-            'logger_custom_id': logger_custom_id,
-            'event_type': 'chain_end',
-            'provider': self.provider,
-            'logger_metadata': self.logger_metadata_json,
-            'payload': self._safe_json_dumps(payload_data)
-        }
-        self._add_entry(entry)
+        # Add event-specific data
+        payload["data"]["outputs"]["outputs"] = outputs
+        
+        # Preserve raw args
+        payload["raw"]["primary_args"] = {"outputs": outputs}
+        
+        # Log the event
+        self._log_event(payload)
     
     def on_chain_error(self, error: Exception, **kwargs):
-        """Log chain error event."""
+        """Log chain error event with standardized payload."""
         if 'chain_error' not in self.event_types:
             return
-            
-        logger_custom_id = self._extract_custom_id_from_tags(kwargs)
         
-        payload_data = {
-            'error': str(error),
-            'error_type': type(error).__name__,
-            'metadata': kwargs,
-            'tags': kwargs.get('tags', []),
-            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else None,
-        }
+        # Create standard payload
+        payload = self._create_standard_payload('chain_error', **kwargs)
         
-        # Add error details if available
-        if hasattr(error, '__dict__'):
-            payload_data['error_details'] = {k: str(v) for k, v in error.__dict__.items() 
-                                            if not k.startswith('_')}
+        # Add error information
+        self._add_error_info(payload, error)
         
-        entry = {
-            'timestamp': datetime.now(timezone.utc),
-            'run_id': str(kwargs.get('run_id', '')),
-            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
-            'logger_custom_id': logger_custom_id,
-            'event_type': 'chain_error',
-            'provider': self.provider,
-            'logger_metadata': self.logger_metadata_json,
-            'payload': self._safe_json_dumps(payload_data)
-        }
-        self._add_entry(entry)
+        # Preserve raw args
+        payload["raw"]["primary_args"] = {"error": str(error)}
+        
+        # Log the event
+        self._log_event(payload)
     
     def on_tool_start(self, serialized: Dict[str, Any], input_str: str, **kwargs):
-        """Log tool start event."""
+        """Log tool start event with standardized payload."""
         if 'tool_start' not in self.event_types:
             return
-            
-        logger_custom_id = self._extract_custom_id_from_tags(kwargs)
         
-        payload_data = {
-            'name': serialized.get('name', 'unknown'),
-            'description': serialized.get('description', ''),
-            'input': input_str,
-            'serialized': serialized,
-            'metadata': kwargs,
-            'tags': kwargs.get('tags', []),
-            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else None,
+        # Create standard payload
+        payload = self._create_standard_payload('tool_start', **kwargs)
+        
+        # Add event-specific data
+        payload["data"]["inputs"]["input_str"] = input_str
+        payload["data"]["inputs"]["serialized"] = serialized
+        payload["data"]["config"]["model"] = serialized.get('name', '')
+        
+        # Add tool description if available
+        if 'description' in serialized:
+            payload["data"]["config"]["response_metadata"] = {'description': serialized['description']}
+        
+        # Preserve raw args
+        payload["raw"]["primary_args"] = {
+            "serialized": serialized,
+            "input_str": input_str
         }
         
-        entry = {
-            'timestamp': datetime.now(timezone.utc),
-            'run_id': str(kwargs.get('run_id', '')),
-            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
-            'logger_custom_id': logger_custom_id,
-            'event_type': 'tool_start',
-            'provider': self.provider,
-            'logger_metadata': self.logger_metadata_json,
-            'payload': self._safe_json_dumps(payload_data)
-        }
-        self._add_entry(entry)
+        # Log the event
+        self._log_event(payload)
     
     def on_tool_end(self, output: str, **kwargs):
-        """Log tool end event."""
+        """Log tool end event with standardized payload."""
         if 'tool_end' not in self.event_types:
             return
-            
-        logger_custom_id = self._extract_custom_id_from_tags(kwargs)
         
-        payload_data = {
-            'output': output,
-            'metadata': kwargs,
-            'tags': kwargs.get('tags', []),
-            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else None,
-        }
+        # Create standard payload
+        payload = self._create_standard_payload('tool_end', **kwargs)
         
-        entry = {
-            'timestamp': datetime.now(timezone.utc),
-            'run_id': str(kwargs.get('run_id', '')),
-            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
-            'logger_custom_id': logger_custom_id,
-            'event_type': 'tool_end',
-            'provider': self.provider,
-            'logger_metadata': self.logger_metadata_json,
-            'payload': self._safe_json_dumps(payload_data)
-        }
-        self._add_entry(entry)
+        # Add event-specific data
+        payload["data"]["outputs"]["output"] = output
+        
+        # Preserve raw args
+        payload["raw"]["primary_args"] = {"output": output}
+        
+        # Log the event
+        self._log_event(payload)
     
     def on_tool_error(self, error: Exception, **kwargs):
-        """Log tool error event."""
+        """Log tool error event with standardized payload."""
         if 'tool_error' not in self.event_types:
             return
-            
-        logger_custom_id = self._extract_custom_id_from_tags(kwargs)
         
-        payload_data = {
-            'error': str(error),
-            'error_type': type(error).__name__,
-            'metadata': kwargs,
-            'tags': kwargs.get('tags', []),
-            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else None,
-        }
+        # Create standard payload
+        payload = self._create_standard_payload('tool_error', **kwargs)
         
-        # Add error details if available
-        if hasattr(error, '__dict__'):
-            payload_data['error_details'] = {k: str(v) for k, v in error.__dict__.items() 
-                                            if not k.startswith('_')}
+        # Add error information
+        self._add_error_info(payload, error)
         
-        entry = {
-            'timestamp': datetime.now(timezone.utc),
-            'run_id': str(kwargs.get('run_id', '')),
-            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
-            'logger_custom_id': logger_custom_id,
-            'event_type': 'tool_error',
-            'provider': self.provider,
-            'logger_metadata': self.logger_metadata_json,
-            'payload': self._safe_json_dumps(payload_data)
-        }
-        self._add_entry(entry)
+        # Preserve raw args
+        payload["raw"]["primary_args"] = {"error": str(error)}
+        
+        # Log the event
+        self._log_event(payload)
     
     def on_agent_action(self, action, **kwargs):
-        """Log agent action event."""
+        """Log agent action event with standardized payload."""
         if 'agent_action' not in self.event_types:
             return
-            
-        logger_custom_id = self._extract_custom_id_from_tags(kwargs)
+        
+        # Create standard payload
+        payload = self._create_standard_payload('agent_action', **kwargs)
         
         # Handle AgentAction object
         if hasattr(action, '__dict__'):
@@ -461,33 +464,24 @@ class ParquetLogger(BaseCallbackHandler):
                 'log': getattr(action, 'log', ''),
             }
         else:
-            action_data = str(action)
+            action_data = {'action': str(action)}
         
-        payload_data = {
-            'action': action_data,
-            'metadata': kwargs,
-            'tags': kwargs.get('tags', []),
-            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else None,
-        }
+        # Add event-specific data
+        payload["data"]["inputs"]["action"] = action_data
         
-        entry = {
-            'timestamp': datetime.now(timezone.utc),
-            'run_id': str(kwargs.get('run_id', '')),
-            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
-            'logger_custom_id': logger_custom_id,
-            'event_type': 'agent_action',
-            'provider': self.provider,
-            'logger_metadata': self.logger_metadata_json,
-            'payload': self._safe_json_dumps(payload_data)
-        }
-        self._add_entry(entry)
+        # Preserve raw args
+        payload["raw"]["primary_args"] = {"action": action_data}
+        
+        # Log the event
+        self._log_event(payload)
     
     def on_agent_finish(self, finish, **kwargs):
-        """Log agent finish event."""
+        """Log agent finish event with standardized payload."""
         if 'agent_finish' not in self.event_types:
             return
-            
-        logger_custom_id = self._extract_custom_id_from_tags(kwargs)
+        
+        # Create standard payload
+        payload = self._create_standard_payload('agent_finish', **kwargs)
         
         # Handle AgentFinish object
         if hasattr(finish, '__dict__'):
@@ -496,26 +490,16 @@ class ParquetLogger(BaseCallbackHandler):
                 'log': getattr(finish, 'log', ''),
             }
         else:
-            finish_data = str(finish)
+            finish_data = {'finish': str(finish)}
         
-        payload_data = {
-            'finish': finish_data,
-            'metadata': kwargs,
-            'tags': kwargs.get('tags', []),
-            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else None,
-        }
+        # Add event-specific data
+        payload["data"]["outputs"]["finish"] = finish_data
         
-        entry = {
-            'timestamp': datetime.now(timezone.utc),
-            'run_id': str(kwargs.get('run_id', '')),
-            'parent_run_id': str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
-            'logger_custom_id': logger_custom_id,
-            'event_type': 'agent_finish',
-            'provider': self.provider,
-            'logger_metadata': self.logger_metadata_json,
-            'payload': self._safe_json_dumps(payload_data)
-        }
-        self._add_entry(entry)
+        # Preserve raw args
+        payload["raw"]["primary_args"] = {"finish": finish_data}
+        
+        # Log the event
+        self._log_event(payload)
     
     def _add_entry(self, entry):
         """Add entry to buffer and flush if needed."""

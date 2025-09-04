@@ -92,20 +92,20 @@ class TestEnhancedEventLogging:
         assert start_event['run_id'] == 'chain-start-123'
         assert start_event['parent_run_id'] == 'parent-123'
         payload = json.loads(start_event['payload'])
-        assert payload['name'] == 'test_chain'
-        assert payload['inputs']['question'] == 'What is 2+2?'
+        assert payload['data']['config']['model'] == 'test_chain'
+        assert payload['data']['inputs']['inputs']['question'] == 'What is 2+2?'
         
         # Check chain_end
         end_event = df[df['event_type'] == 'chain_end'].iloc[0]
         assert end_event['run_id'] == 'chain-end-123'
         payload = json.loads(end_event['payload'])
-        assert payload['outputs']['answer'] == '4'
+        assert payload['data']['outputs']['outputs']['answer'] == '4'
         
         # Check chain_error
         error_event = df[df['event_type'] == 'chain_error'].iloc[0]
         assert error_event['run_id'] == 'chain-error-123'
         payload = json.loads(error_event['payload'])
-        assert 'Chain processing failed' in payload['error']
+        assert 'Chain processing failed' in payload['data']['error']['message']
     
     def test_tool_events(self, temp_log_dir):
         """Test logging of tool events."""
@@ -148,18 +148,18 @@ class TestEnhancedEventLogging:
         # Check tool_start
         start_event = df[df['event_type'] == 'tool_start'].iloc[0]
         payload = json.loads(start_event['payload'])
-        assert payload['name'] == 'calculator'
-        assert payload['input'] == '2 + 2'
+        assert payload['data']['config']['model'] == 'calculator'
+        assert payload['data']['inputs']['input_str'] == '2 + 2'
         
         # Check tool_end
         end_event = df[df['event_type'] == 'tool_end'].iloc[0]
         payload = json.loads(end_event['payload'])
-        assert payload['output'] == '4'
+        assert payload['data']['outputs']['output'] == '4'
         
         # Check tool_error
         error_event = df[df['event_type'] == 'tool_error'].iloc[0]
         payload = json.loads(error_event['payload'])
-        assert 'Calculator malfunction' in payload['error']
+        assert 'Calculator malfunction' in payload['data']['error']['message']
     
     def test_agent_events(self, temp_log_dir):
         """Test logging of agent events."""
@@ -202,13 +202,13 @@ class TestEnhancedEventLogging:
         # Check agent_action
         action_event = df[df['event_type'] == 'agent_action'].iloc[0]
         payload = json.loads(action_event['payload'])
-        assert payload['action']['tool'] == 'search'
-        assert payload['action']['tool_input'] == 'weather today'
+        assert payload['data']['inputs']['action']['tool'] == 'search'
+        assert payload['data']['inputs']['action']['tool_input'] == 'weather today'
         
         # Check agent_finish
         finish_event = df[df['event_type'] == 'agent_finish'].iloc[0]
         payload = json.loads(finish_event['payload'])
-        assert payload['finish']['return_values']['answer'] == 'Sunny, 72°F'
+        assert payload['data']['outputs']['finish']['return_values']['answer'] == 'Sunny, 72°F'
     
     def test_parent_run_id_hierarchy(self, temp_log_dir):
         """Test that parent_run_id properly tracks hierarchy."""
