@@ -68,14 +68,15 @@ def with_tags(*additional_tags: str, custom_id: Optional[str] = None,
     return config
 
 
-# Import batch processing helper
+# Import batch processing helpers
 try:
-    from .batch_helpers import batch_run
+    from .batch_helpers import batch_run, batch_process
     _batch_helpers_available = True
 except ImportError:
-    # Batch helper is optional
+    # Batch helpers are optional
     _batch_helpers_available = False
     batch_run = None
+    batch_process = None
 
 # Import background retrieval helper
 try:
@@ -89,9 +90,9 @@ except ImportError:
 # Define exports
 __all__ = ['ParquetLogger', 'with_tags', '__version__']
 
-# Add batch helper to exports if available
+# Add batch helpers to exports if available
 if _batch_helpers_available:
-    __all__.append('batch_run')
+    __all__.extend(['batch_run', 'batch_process'])
 
 # Add background retrieval to exports if available
 if _background_retrieval_available:

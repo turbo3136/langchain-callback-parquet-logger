@@ -45,7 +45,7 @@ python -m twine upload dist/*
 
 ## Architecture Overview
 
-This package provides a high-performance callback handler for logging LangChain LLM interactions to Parquet files with optional S3 upload support. The architecture consists of four main components:
+This package provides a high-performance callback handler for logging LangChain LLM interactions to Parquet files with optional S3 upload support. The architecture consists of five main components:
 
 ### 1. Core Logging System (`logger.py`)
 - **ParquetLogger**: Main callback handler that intercepts LangChain events
@@ -85,6 +85,16 @@ This package provides a high-performance callback handler for logging LangChain 
 - **Retry Logic**: Exponential backoff with configurable attempts
 - **Credential Chain**: Uses boto3's standard AWS credential resolution
 
+### 5. Enhanced Batch Processing (`batch_process()` in `batch_helpers.py`)
+- **Automated Batch Processing**: High-level function that combines batch processing with automatic logging
+- **Storage Flexibility**: Supports local-only or local + S3 storage modes
+- **Job Metadata**: Automatic organization with job categories, subcategories, versions, and environments
+- **Path Templates**: Flexible path formatting with template variables
+- **LLM Auto-Configuration**: Automatic LLM creation and provider detection
+- **Structured Output**: Built-in support for Pydantic models
+- **Full Parameter Control**: Exposes all ParquetLogger and batch_run parameters
+- **Override Support**: Escape hatches for advanced customization
+
 ## Key Design Patterns
 
 ### Tagging System
@@ -119,6 +129,49 @@ import json
 df = pd.read_parquet("./logs")
 # Parse JSON payload
 df['data'] = df['payload'].apply(json.loads)
+```
+
+### Enhanced Batch Processing (v1.1.0+)
+```python
+from langchain_callback_parquet_logger import batch_process
+import pandas as pd
+
+# Prepare DataFrame
+df = pd.DataFrame({
+    'prompt': ['What is AI?', 'Explain quantum computing'],
+    'config': [with_tags(custom_id='q1'), with_tags(custom_id='q2')]
+})
+
+# Local-only processing
+await batch_process(
+    df,
+    job_category="research",
+    job_subcategory="questions",
+    output_dir="./batch_logs"
+)
+
+# With S3 upload
+await batch_process(
+    df,
+    job_category="production",
+    s3_bucket="my-data-lake",
+    s3_prefix_template="ml/{job_category}/{date}/",
+    max_concurrency=1000
+)
+
+# With structured output
+from pydantic import BaseModel
+
+class Answer(BaseModel):
+    summary: str
+    confidence: float
+
+await batch_process(
+    df,
+    structured_output=Answer,
+    job_category="structured_qa",
+    event_types=['llm_start', 'llm_end', 'chain_start']
+)
 ```
 
 ### Enhanced Event Logging (v0.5.0+)

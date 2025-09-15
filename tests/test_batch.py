@@ -1,11 +1,14 @@
 """
-Tests for batch_run helper functionality.
+Tests for batch_run and batch_process helper functionality.
 """
 
 import pytest
 import pandas as pd
-from unittest.mock import patch, Mock, AsyncMock
-from langchain_callback_parquet_logger import batch_run, with_tags
+import os
+import tempfile
+from pathlib import Path
+from unittest.mock import patch, Mock, AsyncMock, MagicMock
+from langchain_callback_parquet_logger import batch_run, batch_process, with_tags
 
 
 class TestBatchRun:
