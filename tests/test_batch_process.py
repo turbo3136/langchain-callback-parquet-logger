@@ -61,25 +61,27 @@ class TestBatchProcess:
         mock_llm.ainvoke = AsyncMock(return_value=Mock(content="response"))
         
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch('langchain_callback_parquet_logger.logger.boto3') as mock_boto3:
-                # Mock S3 client
-                mock_s3_client = MagicMock()
-                mock_boto3.client.return_value = mock_s3_client
-                
-                results = await batch_process(
-                    df,
-                    llm=mock_llm,
-                    job_category="test_job",
-                    s3_bucket="test-bucket",
-                    s3_prefix_template="jobs/{job_category}/{date}/",
-                    output_dir=tmpdir,
-                    show_progress=False,
-                    buffer_size=1  # Force immediate flush to test S3 upload
-                )
-                
-                # Check local directory was created
-                expected_path = Path(tmpdir) / "test_job" / "default"
-                assert expected_path.exists()
+            # Mock HAS_BOTO3 first, then boto3 module
+            with patch('langchain_callback_parquet_logger.logger.HAS_BOTO3', True):
+                with patch('langchain_callback_parquet_logger.logger.boto3') as mock_boto3:
+                    # Mock S3 client
+                    mock_s3_client = MagicMock()
+                    mock_boto3.client.return_value = mock_s3_client
+                    
+                    results = await batch_process(
+                        df,
+                        llm=mock_llm,
+                        job_category="test_job",
+                        s3_bucket="test-bucket",
+                        s3_prefix_template="jobs/{job_category}/{date}/",
+                        output_dir=tmpdir,
+                        show_progress=False,
+                        buffer_size=1  # Force immediate flush to test S3 upload
+                    )
+                    
+                    # Check local directory was created
+                    expected_path = Path(tmpdir) / "test_job" / "default"
+                    assert expected_path.exists()
     
     @pytest.mark.asyncio
     async def test_batch_process_structured_output(self, sample_dataframe):
@@ -229,7 +231,7 @@ class TestBatchProcess:
         
         mock_llm = AsyncMock()
         
-        with pytest.raises(ValueError, match="DataFrame missing required columns"):
+        with pytest.raises(ValueError, match="DataFrame missing required column"):
             await batch_process(
                 df,
                 llm=mock_llm,
@@ -277,12 +279,20 @@ class TestBatchProcess:
         df['config'] = df['id'].apply(lambda x: with_tags(custom_id=str(x)))
         
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch('langchain_openai.ChatOpenAI') as MockChatOpenAI:
-                mock_llm = AsyncMock()
-                mock_llm.callbacks = []
-                mock_llm.ainvoke = AsyncMock(return_value=Mock(content="response"))
-                MockChatOpenAI.return_value = mock_llm
-                
+            # Create a mock ChatOpenAI class
+            MockChatOpenAI = Mock()
+            mock_llm = AsyncMock()
+            mock_llm.callbacks = []
+            mock_llm.ainvoke = AsyncMock(return_value=Mock(content="response"))
+            MockChatOpenAI.return_value = mock_llm
+            
+            # Patch the import statement inside batch_process
+            import sys
+            mock_module = MagicMock()
+            mock_module.ChatOpenAI = MockChatOpenAI
+            sys.modules['langchain_openai'] = mock_module
+            
+            try:
                 await batch_process(
                     df,
                     output_dir=tmpdir,
@@ -292,3 +302,7 @@ class TestBatchProcess:
                 
                 # Check that ChatOpenAI was instantiated with correct kwargs
                 MockChatOpenAI.assert_called_once_with(model='gpt-4', temperature=0)
+            finally:
+                # Clean up the mock module
+                if 'langchain_openai' in sys.modules:
+                    del sys.modules['langchain_openai']

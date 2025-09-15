@@ -145,12 +145,18 @@ class ParquetLogger(BaseCallbackHandler):
     
     def _create_standard_payload(self, event_type: str, **kwargs) -> Dict[str, Any]:
         """Create minimal standardized payload structure."""
+        parent_run_id = kwargs.get('parent_run_id')
+        if parent_run_id is None:
+            parent_run_id = ''
+        else:
+            parent_run_id = str(parent_run_id)
+        
         return {
             "event_type": event_type,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "execution": {
                 "run_id": str(kwargs.get('run_id', '')),
-                "parent_run_id": str(kwargs.get('parent_run_id', '')) or '',
+                "parent_run_id": parent_run_id,
                 "custom_id": self._extract_custom_id_from_tags(kwargs),
                 "tags": kwargs.get('tags', []) or [],
                 "metadata": kwargs.get('metadata', {}) or {}
@@ -244,14 +250,17 @@ class ParquetLogger(BaseCallbackHandler):
     def on_chain_start(self, serialized: Dict[str, Any], inputs: Dict[str, Any], **kwargs):
         """Log chain start event."""
         self._handle_event('chain_start', {
-            "inputs": inputs,
-            "serialized": serialized,
-            "model": serialized.get('name', '')
+            "config": {
+                "model": serialized.get('name', ''),
+                "type": serialized.get('type', '')
+            },
+            "inputs": {"inputs": inputs},
+            "serialized": serialized
         }, **kwargs)
 
     def on_chain_end(self, outputs: Dict[str, Any], **kwargs):
         """Log chain end event."""
-        self._handle_event('chain_end', {"outputs": outputs}, **kwargs)
+        self._handle_event('chain_end', {"outputs": {"outputs": outputs}}, **kwargs)
 
     def on_chain_error(self, error: Exception, **kwargs):
         """Log chain error event."""
@@ -266,9 +275,12 @@ class ParquetLogger(BaseCallbackHandler):
     def on_tool_start(self, serialized: Dict[str, Any], input_str: str, **kwargs):
         """Log tool start event."""
         data = {
-            "input_str": input_str,
-            "serialized": serialized,
-            "model": serialized.get('name', '')
+            "config": {
+                "model": serialized.get('name', ''),
+                "type": serialized.get('type', '')
+            },
+            "inputs": {"input_str": input_str},
+            "serialized": serialized
         }
         if 'description' in serialized:
             data["description"] = serialized['description']
@@ -276,7 +288,7 @@ class ParquetLogger(BaseCallbackHandler):
 
     def on_tool_end(self, output: str, **kwargs):
         """Log tool end event."""
-        self._handle_event('tool_end', {"output": output}, **kwargs)
+        self._handle_event('tool_end', {"outputs": {"output": output}}, **kwargs)
 
     def on_tool_error(self, error: Exception, **kwargs):
         """Log tool error event."""
@@ -299,7 +311,7 @@ class ParquetLogger(BaseCallbackHandler):
         else:
             action_data = {'action': str(action)}
 
-        self._handle_event('agent_action', {"action": action_data}, **kwargs)
+        self._handle_event('agent_action', {"inputs": {"action": action_data}}, **kwargs)
 
     def on_agent_finish(self, finish, **kwargs):
         """Log agent finish event."""
@@ -311,7 +323,7 @@ class ParquetLogger(BaseCallbackHandler):
         else:
             finish_data = {'finish': str(finish)}
 
-        self._handle_event('agent_finish', {"finish": finish_data}, **kwargs)
+        self._handle_event('agent_finish', {"outputs": {"finish": finish_data}}, **kwargs)
     
     def _add_entry(self, entry):
         """Add entry to buffer and flush if needed."""
