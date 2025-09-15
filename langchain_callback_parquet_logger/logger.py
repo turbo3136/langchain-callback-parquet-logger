@@ -35,11 +35,11 @@ SCHEMA = pa.schema([
 class ParquetLogger(BaseCallbackHandler):
     """Simplified Parquet logger with flexible JSON payload schema."""
     
-    def __init__(self, 
-                 log_dir: str = "./llm_logs", 
-                 buffer_size: int = 100, 
-                 provider: str = "openai", 
-                 logger_metadata: Optional[Dict[str, Any]] = None, 
+    def __init__(self,
+                 log_dir: str = "./llm_logs",
+                 buffer_size: int = 100,
+                 provider: str = "openai",
+                 logger_metadata: Optional[Dict[str, Any]] = None,
                  partition_on: Optional[Literal["date"]] = "date",
                  event_types: Optional[List[str]] = None,
                  s3_bucket: Optional[str] = None,
@@ -65,6 +65,10 @@ class ParquetLogger(BaseCallbackHandler):
             s3_on_failure: How to handle S3 upload failures - "error" to raise exception, "continue" to log and continue
             s3_retry_attempts: Number of retry attempts for failed S3 uploads (default: 3)
         """
+        # Validate inputs
+        if buffer_size <= 0:
+            raise ValueError(f"buffer_size must be positive, got {buffer_size}")
+
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.buffer_size = buffer_size
@@ -103,24 +107,11 @@ class ParquetLogger(BaseCallbackHandler):
         # Register flush to run on program exit
         atexit.register(self.flush)
         
-        # Check if in notebook environment and warn if using default buffer_size
-        if self._is_notebook() and buffer_size == 100:
+        # Simple notebook warning
+        if self._is_notebook() and buffer_size > 10:
             warnings.warn(
-                "\n⚠️  Notebook environment detected with default buffer_size=100.\n"
-                "   Logs will only write to disk after 100 LLM calls.\n"
-                "   \n"
-                "   For immediate writes in notebooks, use one of:\n"
-                "   \n"
-                "   Option 1 - Context manager (recommended):\n"
-                "       with ParquetLogger('./logs') as logger:\n"
-                "           llm.callbacks = [logger]\n"
-                "           response = llm.invoke('your prompt')\n"
-                "   \n"
-                "   Option 2 - Small buffer:\n"
-                "       logger = ParquetLogger('./logs', buffer_size=1)\n"
-                "   \n"
-                "   Option 3 - Manual flush:\n"
-                "       logger.flush()  # Call after your LLM operations\n",
+                f"Notebook detected: buffer_size={buffer_size}. "
+                "Use context manager or call flush() for immediate writes.",
                 stacklevel=2
             )
     
@@ -153,82 +144,27 @@ class ParquetLogger(BaseCallbackHandler):
         return json.dumps(obj, default=default)
     
     def _create_standard_payload(self, event_type: str, **kwargs) -> Dict[str, Any]:
-        """Create standardized payload structure with all sections initialized."""
-        # Parse event type to determine component and phase
-        parts = event_type.replace('_', ' ').split()
-        if len(parts) >= 2:
-            component = parts[0]  # llm, chain, tool, agent
-            phase = parts[1]  # start, end, error, action, finish
-        else:
-            # Handle single-word events like agent_action -> agent action
-            component = parts[0] if parts[0] in ['agent'] else event_type
-            phase = 'action' if 'action' in event_type else 'finish' if 'finish' in event_type else ''
-        
-        # Build standard structure with all fields initialized to non-null defaults
+        """Create minimal standardized payload structure."""
         return {
             "event_type": event_type,
-            "event_phase": phase,
-            "event_component": component,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            
             "execution": {
                 "run_id": str(kwargs.get('run_id', '')),
-                "parent_run_id": str(kwargs.get('parent_run_id', '')) if kwargs.get('parent_run_id') else '',
+                "parent_run_id": str(kwargs.get('parent_run_id', '')) or '',
+                "custom_id": self._extract_custom_id_from_tags(kwargs),
                 "tags": kwargs.get('tags', []) or [],
-                "metadata": kwargs.get('metadata', {}) or {},
-                "custom_id": self._extract_custom_id_from_tags(kwargs)
+                "metadata": kwargs.get('metadata', {}) or {}
             },
-            
-            "data": {
-                "inputs": {
-                    "prompts": [],
-                    "messages": [],
-                    "inputs": {},
-                    "input_str": "",
-                    "action": {},
-                    "serialized": {}
-                },
-                "outputs": {
-                    "response": {},
-                    "outputs": {},
-                    "output": "",
-                    "finish": {},
-                    "usage": {}
-                },
-                "error": {
-                    "message": "",
-                    "type": "",
-                    "details": {},
-                    "traceback": []
-                },
-                "config": {
-                    "invocation_params": {},
-                    "model": "",
-                    "tools": [],
-                    "response_metadata": {}
-                }
-            },
-            
-            "raw": {
-                "kwargs": kwargs.copy(),
-                "primary_args": {}
-            }
+            "data": {},  # Populated by event handlers as needed
+            "raw": kwargs.copy()
         }
     
     def _add_error_info(self, payload: Dict[str, Any], error: Exception) -> None:
-        """Add standardized error information to payload."""
-        payload["data"]["error"]["message"] = str(error)
-        payload["data"]["error"]["type"] = type(error).__name__
-        
-        if hasattr(error, '__dict__'):
-            payload["data"]["error"]["details"] = {
-                k: str(v) for k, v in error.__dict__.items() 
-                if not k.startswith('_')
-            }
-        
-        if hasattr(error, '__traceback__'):
-            import traceback
-            payload["data"]["error"]["traceback"] = traceback.format_tb(error.__traceback__)
+        """Add simple error information to payload."""
+        payload["data"]["error"] = {
+            "message": str(error),
+            "type": type(error).__name__
+        }
     
     def _convert_response(self, response: Any) -> Dict[str, Any]:
         """Convert LangChain response to dict format."""
@@ -258,205 +194,102 @@ class ParquetLogger(BaseCallbackHandler):
         }
         self._add_entry(entry)
     
+    def _handle_event(self, event_type: str, primary_data: Dict[str, Any], **kwargs):
+        """Generic event handler to reduce duplication."""
+        if event_type not in self.event_types:
+            return
+
+        payload = self._create_standard_payload(event_type, **kwargs)
+        payload["data"] = primary_data
+        payload["raw"]["primary_args"] = primary_data
+        self._log_event(payload)
+
     def on_llm_start(self, serialized: Dict, prompts: List[str], **kwargs):
-        """Log LLM start event with standardized payload."""
-        if 'llm_start' not in self.event_types:
-            return
-        
-        # Create standard payload
-        payload = self._create_standard_payload('llm_start', **kwargs)
-        
-        # Add event-specific data
-        payload["data"]["inputs"]["prompts"] = prompts
-        payload["data"]["inputs"]["serialized"] = serialized
-        payload["data"]["config"]["model"] = serialized.get('kwargs', {}).get('model_name', '')
-        payload["data"]["config"]["invocation_params"] = serialized.get('kwargs', {})
-        payload["data"]["config"]["tools"] = kwargs.get('tools', []) or []
-        
-        # Handle messages if present (for chat models)
-        if 'messages' in kwargs:
-            payload["data"]["inputs"]["messages"] = kwargs['messages']
-        
-        # Preserve raw args
-        payload["raw"]["primary_args"] = {
+        """Log LLM start event."""
+        data = {
+            "prompts": prompts,
             "serialized": serialized,
-            "prompts": prompts
+            "model": serialized.get('kwargs', {}).get('model_name', ''),
+            "invocation_params": serialized.get('kwargs', {}),
+            "tools": kwargs.get('tools', []) or []
         }
-        
-        # Log the event
-        self._log_event(payload)
-    
+        if 'messages' in kwargs:
+            data["messages"] = kwargs['messages']
+        self._handle_event('llm_start', data, **kwargs)
+
     def on_llm_end(self, response, **kwargs):
-        """Log LLM end event with standardized payload."""
-        if 'llm_end' not in self.event_types:
-            return
-        
-        # Create standard payload
-        payload = self._create_standard_payload('llm_end', **kwargs)
-        
-        # Convert response to dict
+        """Log LLM end event."""
         response_data = self._convert_response(response)
-        
-        # Add event-specific data
-        payload["data"]["outputs"]["response"] = response_data
-        
-        # Extract token usage if available
+        data = {"response": response_data}
+
         if hasattr(response, 'llm_output') and response.llm_output:
-            payload["data"]["outputs"]["usage"] = response.llm_output.get('token_usage', {})
-            payload["data"]["config"]["model"] = response.llm_output.get('model_name', '')
-        
-        # Add response metadata if available
+            data["usage"] = response.llm_output.get('token_usage', {})
+            data["model"] = response.llm_output.get('model_name', '')
+
         if hasattr(response, 'response_metadata'):
-            payload["data"]["config"]["response_metadata"] = response.response_metadata
-        
-        # Preserve raw args
-        payload["raw"]["primary_args"] = {"response": response_data}
-        
-        # Log the event
-        self._log_event(payload)
-    
+            data["response_metadata"] = response.response_metadata
+
+        self._handle_event('llm_end', data, **kwargs)
+
     def on_llm_error(self, error, **kwargs):
-        """Log LLM error event with standardized payload."""
+        """Log LLM error event."""
         if 'llm_error' not in self.event_types:
             return
-        
-        # Create standard payload
+
         payload = self._create_standard_payload('llm_error', **kwargs)
-        
-        # Add error information
         self._add_error_info(payload, error)
-        
-        # Preserve raw args
         payload["raw"]["primary_args"] = {"error": str(error)}
-        
-        # Log the event
         self._log_event(payload)
-    
+
     def on_chain_start(self, serialized: Dict[str, Any], inputs: Dict[str, Any], **kwargs):
-        """Log chain start event with standardized payload."""
-        if 'chain_start' not in self.event_types:
-            return
-        
-        # Create standard payload
-        payload = self._create_standard_payload('chain_start', **kwargs)
-        
-        # Add event-specific data
-        payload["data"]["inputs"]["inputs"] = inputs
-        payload["data"]["inputs"]["serialized"] = serialized
-        payload["data"]["config"]["model"] = serialized.get('name', '')
-        
-        # Preserve raw args
-        payload["raw"]["primary_args"] = {
+        """Log chain start event."""
+        self._handle_event('chain_start', {
+            "inputs": inputs,
             "serialized": serialized,
-            "inputs": inputs
-        }
-        
-        # Log the event
-        self._log_event(payload)
-    
+            "model": serialized.get('name', '')
+        }, **kwargs)
+
     def on_chain_end(self, outputs: Dict[str, Any], **kwargs):
-        """Log chain end event with standardized payload."""
-        if 'chain_end' not in self.event_types:
-            return
-        
-        # Create standard payload
-        payload = self._create_standard_payload('chain_end', **kwargs)
-        
-        # Add event-specific data
-        payload["data"]["outputs"]["outputs"] = outputs
-        
-        # Preserve raw args
-        payload["raw"]["primary_args"] = {"outputs": outputs}
-        
-        # Log the event
-        self._log_event(payload)
-    
+        """Log chain end event."""
+        self._handle_event('chain_end', {"outputs": outputs}, **kwargs)
+
     def on_chain_error(self, error: Exception, **kwargs):
-        """Log chain error event with standardized payload."""
+        """Log chain error event."""
         if 'chain_error' not in self.event_types:
             return
-        
-        # Create standard payload
+
         payload = self._create_standard_payload('chain_error', **kwargs)
-        
-        # Add error information
         self._add_error_info(payload, error)
-        
-        # Preserve raw args
         payload["raw"]["primary_args"] = {"error": str(error)}
-        
-        # Log the event
         self._log_event(payload)
-    
+
     def on_tool_start(self, serialized: Dict[str, Any], input_str: str, **kwargs):
-        """Log tool start event with standardized payload."""
-        if 'tool_start' not in self.event_types:
-            return
-        
-        # Create standard payload
-        payload = self._create_standard_payload('tool_start', **kwargs)
-        
-        # Add event-specific data
-        payload["data"]["inputs"]["input_str"] = input_str
-        payload["data"]["inputs"]["serialized"] = serialized
-        payload["data"]["config"]["model"] = serialized.get('name', '')
-        
-        # Add tool description if available
-        if 'description' in serialized:
-            payload["data"]["config"]["response_metadata"] = {'description': serialized['description']}
-        
-        # Preserve raw args
-        payload["raw"]["primary_args"] = {
+        """Log tool start event."""
+        data = {
+            "input_str": input_str,
             "serialized": serialized,
-            "input_str": input_str
+            "model": serialized.get('name', '')
         }
-        
-        # Log the event
-        self._log_event(payload)
-    
+        if 'description' in serialized:
+            data["description"] = serialized['description']
+        self._handle_event('tool_start', data, **kwargs)
+
     def on_tool_end(self, output: str, **kwargs):
-        """Log tool end event with standardized payload."""
-        if 'tool_end' not in self.event_types:
-            return
-        
-        # Create standard payload
-        payload = self._create_standard_payload('tool_end', **kwargs)
-        
-        # Add event-specific data
-        payload["data"]["outputs"]["output"] = output
-        
-        # Preserve raw args
-        payload["raw"]["primary_args"] = {"output": output}
-        
-        # Log the event
-        self._log_event(payload)
-    
+        """Log tool end event."""
+        self._handle_event('tool_end', {"output": output}, **kwargs)
+
     def on_tool_error(self, error: Exception, **kwargs):
-        """Log tool error event with standardized payload."""
+        """Log tool error event."""
         if 'tool_error' not in self.event_types:
             return
-        
-        # Create standard payload
+
         payload = self._create_standard_payload('tool_error', **kwargs)
-        
-        # Add error information
         self._add_error_info(payload, error)
-        
-        # Preserve raw args
         payload["raw"]["primary_args"] = {"error": str(error)}
-        
-        # Log the event
         self._log_event(payload)
-    
+
     def on_agent_action(self, action, **kwargs):
-        """Log agent action event with standardized payload."""
-        if 'agent_action' not in self.event_types:
-            return
-        
-        # Create standard payload
-        payload = self._create_standard_payload('agent_action', **kwargs)
-        
-        # Handle AgentAction object
+        """Log agent action event."""
         if hasattr(action, '__dict__'):
             action_data = {
                 'tool': getattr(action, 'tool', ''),
@@ -465,25 +298,11 @@ class ParquetLogger(BaseCallbackHandler):
             }
         else:
             action_data = {'action': str(action)}
-        
-        # Add event-specific data
-        payload["data"]["inputs"]["action"] = action_data
-        
-        # Preserve raw args
-        payload["raw"]["primary_args"] = {"action": action_data}
-        
-        # Log the event
-        self._log_event(payload)
-    
+
+        self._handle_event('agent_action', {"action": action_data}, **kwargs)
+
     def on_agent_finish(self, finish, **kwargs):
-        """Log agent finish event with standardized payload."""
-        if 'agent_finish' not in self.event_types:
-            return
-        
-        # Create standard payload
-        payload = self._create_standard_payload('agent_finish', **kwargs)
-        
-        # Handle AgentFinish object
+        """Log agent finish event."""
         if hasattr(finish, '__dict__'):
             finish_data = {
                 'return_values': getattr(finish, 'return_values', {}),
@@ -491,27 +310,32 @@ class ParquetLogger(BaseCallbackHandler):
             }
         else:
             finish_data = {'finish': str(finish)}
-        
-        # Add event-specific data
-        payload["data"]["outputs"]["finish"] = finish_data
-        
-        # Preserve raw args
-        payload["raw"]["primary_args"] = {"finish": finish_data}
-        
-        # Log the event
-        self._log_event(payload)
+
+        self._handle_event('agent_finish', {"finish": finish_data}, **kwargs)
     
     def _add_entry(self, entry):
         """Add entry to buffer and flush if needed."""
         with self.lock:
             self.buffer.append(entry)
             if len(self.buffer) >= self.buffer_size:
-                self._flush()
-    
+                self._flush_locked()
+
     def flush(self):
         """Manual flush of the buffer."""
         with self.lock:
-            self._flush()
+            self._flush_locked()
+
+    def _flush_locked(self):
+        """Internal flush that assumes lock is already held."""
+        if not self.buffer:
+            return
+
+        # Copy buffer and clear it while holding lock
+        buffer_to_write = self.buffer.copy()
+        self.buffer = []
+
+        # Release lock before doing I/O
+        self._write_buffer(buffer_to_write)
     
     def _upload_to_s3(self, table: pa.Table, relative_path: Path):
         """Upload Parquet table to S3 with retry logic.
@@ -559,30 +383,27 @@ class ParquetLogger(BaseCallbackHandler):
                 # Exponential backoff before retry
                 time.sleep(2 ** attempt)
     
-    def _flush(self):
-        """Write buffer to Parquet file."""
-        if not self.buffer:
-            return
-        
+    def _write_buffer(self, buffer):
+        """Write buffer to Parquet file (called without lock held)."""
         try:
             # Build columns explicitly to avoid type inference and NumPy issues
-            ts = pa.array([e["timestamp"] for e in self.buffer],
+            ts = pa.array([e["timestamp"] for e in buffer],
                           type=pa.timestamp("us", tz="UTC"))
-            run_id = pa.array([e["run_id"] for e in self.buffer], type=pa.string())
+            run_id = pa.array([e["run_id"] for e in buffer], type=pa.string())
             # Handle backward compatibility - entries may not have parent_run_id
-            parent_run_id = pa.array([e.get("parent_run_id", "") for e in self.buffer], type=pa.string())
-            logger_custom_id = pa.array([e["logger_custom_id"] for e in self.buffer], type=pa.string())
-            event_type = pa.array([e["event_type"] for e in self.buffer], type=pa.string())
-            provider = pa.array([e["provider"] for e in self.buffer], type=pa.string())
-            logger_metadata = pa.array([e["logger_metadata"] for e in self.buffer], type=pa.string())
-            payload = pa.array([e["payload"] for e in self.buffer], type=pa.string())
-            
+            parent_run_id = pa.array([e.get("parent_run_id", "") for e in buffer], type=pa.string())
+            logger_custom_id = pa.array([e["logger_custom_id"] for e in buffer], type=pa.string())
+            event_type = pa.array([e["event_type"] for e in buffer], type=pa.string())
+            provider = pa.array([e["provider"] for e in buffer], type=pa.string())
+            logger_metadata = pa.array([e["logger_metadata"] for e in buffer], type=pa.string())
+            payload = pa.array([e["payload"] for e in buffer], type=pa.string())
+
             # Create table with explicit schema
             table = pa.Table.from_arrays(
                 [ts, run_id, parent_run_id, logger_custom_id, event_type, provider, logger_metadata, payload],
                 schema=SCHEMA
             )
-            
+
             # Determine output directory based on partitioning strategy
             if self.partition_on == "date":
                 # Daily partitioning
@@ -592,21 +413,20 @@ class ParquetLogger(BaseCallbackHandler):
             else:
                 # No partitioning - save directly to log_dir
                 output_dir = self.log_dir
-            
+
             # Unique filename
             timestamp = datetime.now().strftime('%H%M%S_%f')
             filepath = output_dir / f"logs_{timestamp}.parquet"
-            
+
             # Write to Parquet
             pq.write_table(table, filepath, compression='snappy')
-            
+
             # Upload to S3 if configured
             if self.s3_bucket:
                 # Calculate relative path for S3 key
                 relative_path = filepath.relative_to(self.log_dir)
                 self._upload_to_s3(table, relative_path)
-            
-            self.buffer = []
+
         except RuntimeError:
             # Re-raise S3 errors when in error mode
             raise

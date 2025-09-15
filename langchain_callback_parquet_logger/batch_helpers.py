@@ -137,176 +137,165 @@ async def batch_run(
 async def batch_process(
     df: "pd.DataFrame",
     llm: Any = None,
-    llm_class: Optional[Type] = None,
-    structured_output: Optional[Type] = None,
-    
-    # Job metadata
-    job_category: str = "batch_processing",
-    job_subcategory: str = "default",
-    job_description: str = "",
-    job_version: str = "1.0.0",
-    environment: str = "production",
-    
-    # Storage configuration - LOCAL OR S3
-    output_dir: str = "./batch_logs",
-    output_path_template: str = "{job_category}/{job_subcategory}",
-    
-    # S3 configuration (optional - only used if s3_bucket provided)
-    s3_bucket: Optional[str] = None,
-    s3_prefix_template: Optional[str] = None,
-    s3_on_failure: Optional[Literal["error", "continue"]] = None,
-    s3_retry_attempts: int = 3,
-    
-    # Logger configuration - ALL PARAMETERS EXPOSED
-    provider: Optional[str] = None,
-    buffer_size: int = 1000,
-    partition_on: Optional[Literal["date"]] = "date",
-    event_types: Optional[List[str]] = None,
-    
-    # LLM configuration
-    llm_kwargs: Optional[Dict[str, Any]] = None,
-    model_kwargs: Optional[Dict[str, Any]] = None,
-    
-    # Processing configuration - ALL PARAMETERS EXPOSED
-    max_concurrency: int = 100,
-    show_progress: bool = True,
-    return_exceptions: bool = True,
-    return_results: bool = False,
-    
-    # Column names
-    prompt_col: str = "prompt",
-    config_col: str = "config",
-    tools_col: Optional[str] = "tools",
-    
-    # Additional customization
-    extra_metadata: Optional[Dict[str, Any]] = None,
-    logger_kwargs_override: Optional[Dict[str, Any]] = None,
-    batch_kwargs_override: Optional[Dict[str, Any]] = None,
+    job_config: Optional[Dict[str, Any]] = None,
+    storage_config: Optional[Dict[str, Any]] = None,
+    processing_config: Optional[Dict[str, Any]] = None,
+    column_config: Optional[Dict[str, str]] = None,
+    **kwargs  # For backward compatibility and advanced overrides
 ) -> Optional[List]:
     """
     Batch process DataFrame through LLM with automatic logging to Parquet.
-    
-    Supports three storage modes:
-    1. Local only (default): Write Parquet files to local directory
-    2. Local + S3: Write locally then upload to S3
-    3. Memory efficient: Don't keep results in memory (return_results=False)
-    
+
     Args:
         df: DataFrame with prepared data
         llm: Pre-configured LLM instance (if None, will create one)
-        llm_class: LLM class to instantiate (default: ChatOpenAI if available)
-        structured_output: Pydantic model for structured output
-        
-        job_category: Category for organizing logs (default: "batch_processing")
-        job_subcategory: Subcategory for organizing logs (default: "default")
-        job_description: Human-readable description of the job
-        job_version: Version string for the job (default: "1.0.0")
-        environment: Environment name (default: "production")
-        
-        output_dir: Base directory for local Parquet files (default: "./batch_logs")
-        output_path_template: Template for organizing files locally
-        
-        s3_bucket: S3 bucket name (None = local only, string = also upload to S3)
-        s3_prefix_template: S3 path template (defaults to output_path_template)
-        s3_on_failure: How to handle S3 failures - "error" or "continue"
-        s3_retry_attempts: Number of S3 upload retry attempts (default: 3)
-        
-        provider: LLM provider name (auto-detected if None)
-        buffer_size: Number of entries before flushing to disk (default: 1000)
-        partition_on: Partitioning strategy - "date" or None (default: "date")
-        event_types: Event types to log (default: LLM events only)
-        
-        llm_kwargs: Keyword arguments for LLM initialization
-        model_kwargs: Model-specific keyword arguments
-        
-        max_concurrency: Maximum concurrent LLM requests (default: 100)
-        show_progress: Show progress bar (default: True)
-        return_exceptions: Return exceptions instead of raising (default: True)
-        return_results: Keep results in memory (default: False for efficiency)
-        
-        prompt_col: DataFrame column containing prompts (default: "prompt")
-        config_col: DataFrame column containing configs (default: "config")
-        tools_col: DataFrame column containing tools (default: "tools")
-        
-        extra_metadata: Additional metadata to include in logs
-        logger_kwargs_override: Override any ParquetLogger parameters
-        batch_kwargs_override: Override any batch_run parameters
-        
+        job_config: Job metadata configuration dict with keys:
+            - category: Category for organizing logs (default: "batch_processing")
+            - subcategory: Subcategory (default: "default")
+            - description: Human-readable description
+            - version: Version string (default: "1.0.0")
+            - environment: Environment name (default: "production")
+            - metadata: Additional metadata dict
+        storage_config: Storage configuration dict with keys:
+            - output_dir: Base directory for local files (default: "./batch_logs")
+            - path_template: Template for organizing files
+            - s3_bucket: S3 bucket name (optional)
+            - s3_prefix: S3 prefix template (optional)
+            - s3_on_failure: "error" or "continue" (default: auto)
+            - s3_retries: Number of retry attempts (default: 3)
+        processing_config: Processing configuration dict with keys:
+            - max_concurrency: Maximum concurrent requests (default: 100)
+            - buffer_size: Entries before flushing (default: 1000)
+            - show_progress: Show progress bar (default: True)
+            - return_exceptions: Return exceptions (default: True)
+            - return_results: Keep results in memory (default: False)
+            - event_types: Event types to log (optional)
+            - partition_on: "date" or None (default: "date")
+            - provider: LLM provider name (auto-detected if None)
+        column_config: Column name configuration dict with keys:
+            - prompt: Column containing prompts (default: "prompt")
+            - config: Column containing configs (default: "config")
+            - tools: Column containing tools (default: "tools")
+        **kwargs: Additional parameters for backward compatibility:
+            - llm_class, structured_output, llm_kwargs, model_kwargs
+            - Direct parameters like job_category, output_dir, etc.
+            - logger_kwargs_override, batch_kwargs_override
+
     Returns:
         List of results if return_results=True, None otherwise
-        
-    Storage Configuration:
-        Local storage is always used (even with S3 enabled).
-        S3 upload is optional and happens after local write.
-        
-        output_dir: Base directory for local Parquet files
-        output_path_template: Template for organizing files locally
-        s3_bucket: If provided, also upload to this S3 bucket
-        s3_prefix_template: S3 organization (defaults to output_path_template)
-    
-    Path Template Variables:
-        {job_category}: From job_category parameter
-        {job_subcategory}: From job_subcategory parameter
-        {environment}: From environment parameter
-        {job_version}: From job_version parameter
-        {date}: Current date (YYYY-MM-DD)
-    
+
     Examples:
-        # Local only processing
-        >>> await batch_process(df, job_category="validation")
-        
-        # Local with organized structure
+        # Simple usage with configs
         >>> await batch_process(
         ...     df,
-        ...     job_category="emails",
-        ...     output_dir="/data/batches",
-        ...     output_path_template="{job_category}/v{job_version}"
+        ...     job_config={'category': 'analysis', 'version': '2.0'},
+        ...     storage_config={'s3_bucket': 'my-bucket'}
         ... )
-        
-        # With S3 upload
+
+        # Backward compatible usage
         >>> await batch_process(
         ...     df,
-        ...     job_category="production",
+        ...     job_category="validation",
         ...     s3_bucket="my-bucket",
-        ...     s3_prefix_template="ml/{job_category}/{date}/"
-        ... )
-        
-        # With structured output
-        >>> from pydantic import BaseModel
-        >>> class EmailInfo(BaseModel):
-        ...     email: str
-        ...     valid: bool
-        >>> 
-        >>> await batch_process(
-        ...     df,
-        ...     structured_output=EmailInfo,
-        ...     job_category="email_validation",
         ...     max_concurrency=1000
         ... )
-        
-        # Advanced with overrides
-        >>> await batch_process(
-        ...     df,
-        ...     job_category="analysis",
-        ...     event_types=['llm_start', 'llm_end', 'chain_start'],
-        ...     logger_kwargs_override={'custom_param': 'value'}
-        ... )
     """
+    # Handle backward compatibility - merge kwargs into configs
+    job_config = job_config or {}
+    storage_config = storage_config or {}
+    processing_config = processing_config or {}
+    column_config = column_config or {}
+
+    # Map old parameter names to new config structure
+    if 'job_category' in kwargs:
+        job_config.setdefault('category', kwargs.pop('job_category'))
+    if 'job_subcategory' in kwargs:
+        job_config.setdefault('subcategory', kwargs.pop('job_subcategory'))
+    if 'job_description' in kwargs:
+        job_config.setdefault('description', kwargs.pop('job_description'))
+    if 'job_version' in kwargs:
+        job_config.setdefault('version', kwargs.pop('job_version'))
+    if 'environment' in kwargs:
+        job_config.setdefault('environment', kwargs.pop('environment'))
+    if 'extra_metadata' in kwargs:
+        job_config.setdefault('metadata', kwargs.pop('extra_metadata'))
+
+    if 'output_dir' in kwargs:
+        storage_config.setdefault('output_dir', kwargs.pop('output_dir'))
+    if 'output_path_template' in kwargs:
+        storage_config.setdefault('path_template', kwargs.pop('output_path_template'))
+    if 's3_bucket' in kwargs:
+        storage_config.setdefault('s3_bucket', kwargs.pop('s3_bucket'))
+    if 's3_prefix_template' in kwargs:
+        storage_config.setdefault('s3_prefix', kwargs.pop('s3_prefix_template'))
+    if 's3_on_failure' in kwargs:
+        storage_config.setdefault('s3_on_failure', kwargs.pop('s3_on_failure'))
+    if 's3_retry_attempts' in kwargs:
+        storage_config.setdefault('s3_retries', kwargs.pop('s3_retry_attempts'))
+
+    if 'max_concurrency' in kwargs:
+        processing_config.setdefault('max_concurrency', kwargs.pop('max_concurrency'))
+    if 'buffer_size' in kwargs:
+        processing_config.setdefault('buffer_size', kwargs.pop('buffer_size'))
+    if 'show_progress' in kwargs:
+        processing_config.setdefault('show_progress', kwargs.pop('show_progress'))
+    if 'return_exceptions' in kwargs:
+        processing_config.setdefault('return_exceptions', kwargs.pop('return_exceptions'))
+    if 'return_results' in kwargs:
+        processing_config.setdefault('return_results', kwargs.pop('return_results'))
+    if 'event_types' in kwargs:
+        processing_config.setdefault('event_types', kwargs.pop('event_types'))
+    if 'partition_on' in kwargs:
+        processing_config.setdefault('partition_on', kwargs.pop('partition_on'))
+    if 'provider' in kwargs:
+        processing_config.setdefault('provider', kwargs.pop('provider'))
+
+    if 'prompt_col' in kwargs:
+        column_config.setdefault('prompt', kwargs.pop('prompt_col'))
+    if 'config_col' in kwargs:
+        column_config.setdefault('config', kwargs.pop('config_col'))
+    if 'tools_col' in kwargs:
+        column_config.setdefault('tools', kwargs.pop('tools_col'))
+
+    # Extract remaining kwargs for LLM and overrides
+    llm_class = kwargs.pop('llm_class', None)
+    structured_output = kwargs.pop('structured_output', None)
+    llm_kwargs = kwargs.pop('llm_kwargs', None)
+    model_kwargs = kwargs.pop('model_kwargs', None)
+    logger_kwargs_override = kwargs.pop('logger_kwargs_override', None)
+    batch_kwargs_override = kwargs.pop('batch_kwargs_override', None)
+
+    # Set defaults for configs
+    job_category = job_config.get('category', 'batch_processing')
+    job_subcategory = job_config.get('subcategory', 'default')
+    job_description = job_config.get('description', '')
+    job_version = job_config.get('version', '1.0.0')
+    environment = job_config.get('environment', 'production')
+    extra_metadata = job_config.get('metadata', {})
+
+    output_dir = storage_config.get('output_dir', './batch_logs')
+    output_path_template = storage_config.get('path_template', '{job_category}/{job_subcategory}')
+    s3_bucket = storage_config.get('s3_bucket')
+    s3_prefix_template = storage_config.get('s3_prefix')
+    s3_on_failure = storage_config.get('s3_on_failure')
+    s3_retry_attempts = storage_config.get('s3_retries', 3)
+
+    max_concurrency = processing_config.get('max_concurrency', 100)
+    buffer_size = processing_config.get('buffer_size', 1000)
+    show_progress = processing_config.get('show_progress', True)
+    return_exceptions = processing_config.get('return_exceptions', True)
+    return_results = processing_config.get('return_results', False)
+    event_types = processing_config.get('event_types')
+    partition_on = processing_config.get('partition_on', 'date')
+    provider = processing_config.get('provider')
+
+    prompt_col = column_config.get('prompt', 'prompt')
+    config_col = column_config.get('config', 'config')
+    tools_col = column_config.get('tools', 'tools')
+
     # Validate DataFrame has required columns
-    missing_cols = []
     if prompt_col not in df.columns:
-        missing_cols.append(prompt_col)
-    # Only check for config_col if it's not None and not in columns
-    if config_col and config_col not in df.columns:
-        # config_col is optional, only error if explicitly specified but missing
-        pass  # Don't add to missing_cols since it's optional
-    # Only check for tools_col if it's explicitly specified and not in columns
-    if tools_col and tools_col not in df.columns:
-        # tools_col is optional, only error if explicitly specified but missing
-        pass  # Don't add to missing_cols since it's optional
-    
-    if missing_cols:
-        raise ValueError(f"DataFrame missing required columns: {missing_cols}")
+        raise ValueError(f"DataFrame missing required column: {prompt_col}")
     
     # Handle LLM creation
     if llm is None:
@@ -320,18 +309,18 @@ async def batch_process(
                     "No LLM provided and ChatOpenAI not available. "
                     "Either provide 'llm' parameter or install langchain-openai"
                 )
-        
+
         # Initialize LLM with provided kwargs
         llm_init_kwargs = llm_kwargs or {}
         if model_kwargs:
             llm_init_kwargs['model_kwargs'] = model_kwargs
-        
+
         llm = llm_class(**llm_init_kwargs)
-    
+
     # Apply structured output if provided
     if structured_output:
         llm = llm.with_structured_output(structured_output)
-    
+
     # Auto-detect provider if not specified
     if provider is None:
         # Try to detect from LLM class
