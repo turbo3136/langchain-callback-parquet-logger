@@ -1,24 +1,22 @@
-# langchain_parquet_logger/logger.py
+# langchain_callback_parquet_logger/logger.py
+"""Core Parquet logger for LangChain callbacks."""
+
 import json
 import threading
-import time  # Explicit import to ensure it's available for PyArrow
-import atexit  # For automatic cleanup on exit
+import atexit
 import warnings
 from pathlib import Path
 from datetime import datetime, date, timezone
 from typing import Dict, Any, List, Optional, Literal, Set
-from io import BytesIO
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 from langchain_core.callbacks import BaseCallbackHandler
 
-# Optional boto3 import for S3 support
-try:
-    import boto3
-    HAS_BOTO3 = True
-except ImportError:
-    boto3 = None
-    HAS_BOTO3 = False
+from .config import S3Config, EventType, DEFAULT_PROVIDER
+from .storage import create_storage, StorageBackend
+from .tagging import extract_custom_id
+
 
 # Define explicit schema to avoid type inference issues
 SCHEMA = pa.schema([
@@ -32,38 +30,29 @@ SCHEMA = pa.schema([
     ("payload", pa.string()),
 ])
 
+
 class ParquetLogger(BaseCallbackHandler):
-    """Simplified Parquet logger with flexible JSON payload schema."""
-    
-    def __init__(self,
-                 log_dir: str = "./llm_logs",
-                 buffer_size: int = 100,
-                 provider: str = "openai",
-                 logger_metadata: Optional[Dict[str, Any]] = None,
-                 partition_on: Optional[Literal["date"]] = "date",
-                 event_types: Optional[List[str]] = None,
-                 s3_bucket: Optional[str] = None,
-                 s3_prefix: str = "langchain-logs/",
-                 s3_on_failure: Literal["error", "continue"] = "error",
-                 s3_retry_attempts: int = 3):
+    """Parquet logger for LangChain callbacks with flexible storage backends."""
+
+    def __init__(
+        self,
+        log_dir: str = "./llm_logs",
+        buffer_size: int = 100,
+        logger_metadata: Optional[Dict[str, Any]] = None,
+        partition_on: Optional[Literal["date"]] = "date",
+        event_types: Optional[List[str]] = None,
+        s3_config: Optional[S3Config] = None
+    ):
         """
         Initialize the Parquet logger.
-        
+
         Args:
             log_dir: Directory to save log files
             buffer_size: Number of entries to buffer before flushing to disk
-            provider: LLM provider name (default: "openai")
-            logger_metadata: Optional dictionary of metadata to include with all log entries
-            partition_on: Partitioning strategy - "date" for daily partitions or None for no partitioning (default: "date")
-            event_types: List of event types to log. If None, logs only LLM events.
-                Available types: 'llm_start', 'llm_end', 'llm_error',
-                                'chain_start', 'chain_end', 'chain_error',
-                                'tool_start', 'tool_end', 'tool_error',
-                                'agent_action', 'agent_finish'
-            s3_bucket: Optional S3 bucket name for uploading logs
-            s3_prefix: Prefix/folder path in S3 bucket (default: "langchain-logs/")
-            s3_on_failure: How to handle S3 upload failures - "error" to raise exception, "continue" to log and continue
-            s3_retry_attempts: Number of retry attempts for failed S3 uploads (default: 3)
+            logger_metadata: Optional metadata to include with all log entries
+            partition_on: Partitioning strategy - "date" or None
+            event_types: List of event types to log (defaults to LLM events only)
+            s3_config: Optional S3 configuration for uploading logs
         """
         # Validate inputs
         if buffer_size <= 0:
@@ -72,41 +61,33 @@ class ParquetLogger(BaseCallbackHandler):
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.buffer_size = buffer_size
-        self.provider = provider
         self.logger_metadata = logger_metadata or {}
         self.partition_on = partition_on
-        
-        # S3 configuration
-        self.s3_bucket = s3_bucket
-        self.s3_prefix = s3_prefix.rstrip('/') + '/' if s3_prefix else ''
-        self.s3_on_failure = s3_on_failure
-        self.s3_retry_attempts = s3_retry_attempts
-        
-        # Check if boto3 is available when S3 is configured
-        if self.s3_bucket and not HAS_BOTO3:
-            raise ImportError(
-                "boto3 is required for S3 support. "
-                "Install it with: pip install langchain-callback-parquet-logger[s3]"
-            )
-        
+
         # Set event types to log
         if event_types is None:
-            # Default to LLM events only for backward compatibility
-            self.event_types: Set[str] = {'llm_start', 'llm_end', 'llm_error'}
+            self.event_types: Set[str] = set(EventType.default_set())
         else:
             self.event_types: Set[str] = set(event_types)
-        # Safely serialize metadata with fallback
+
+        # Create storage backend
+        self.storage = create_storage(log_dir, s3_config)
+
+        # Auto-detect provider from metadata or use default
+        self.provider = self._detect_provider()
+
+        # Safely serialize metadata
         try:
             self.logger_metadata_json = json.dumps(self.logger_metadata, default=str)
         except Exception:
-            self.logger_metadata_json = "{}"  # Fallback to empty JSON if serialization fails
-        
+            self.logger_metadata_json = "{}"
+
         self.buffer = []
         self.lock = threading.Lock()
-        
+
         # Register flush to run on program exit
         atexit.register(self.flush)
-        
+
         # Simple notebook warning
         if self._is_notebook() and buffer_size > 10:
             warnings.warn(
@@ -114,64 +95,59 @@ class ParquetLogger(BaseCallbackHandler):
                 "Use context manager or call flush() for immediate writes.",
                 stacklevel=2
             )
-    
+
+    def _detect_provider(self) -> str:
+        """Auto-detect provider from metadata or return default."""
+        if 'provider' in self.logger_metadata:
+            return self.logger_metadata['provider']
+        if 'llm_provider' in self.logger_metadata:
+            return self.logger_metadata['llm_provider']
+        return DEFAULT_PROVIDER
+
     def _is_notebook(self) -> bool:
         """Detect if running in a notebook environment."""
         try:
             from IPython import get_ipython
-            if get_ipython() is not None:
-                return True
+            return get_ipython() is not None
         except ImportError:
-            pass
-        return False
-    
-    def _extract_custom_id_from_tags(self, kwargs: Dict[str, Any]) -> str:
-        """Extract logger_custom_id from tags."""
-        tags = kwargs.get('tags', []) or []
-        for tag in tags:
-            if isinstance(tag, str) and tag.startswith('logger_custom_id:'):
-                return tag.split(':', 1)[1]  # Everything after first colon
-        return ''
-    
+            return False
+
     def _safe_json_dumps(self, obj: Any) -> str:
-        """Convert object to JSON string, handling UUIDs and other non-serializable types."""
+        """Convert object to JSON string safely."""
         def default(o):
-            # Handle common non-serializable types
             if hasattr(o, '__str__'):
                 return str(o)
             return f"<{type(o).__name__}>"
-        
         return json.dumps(obj, default=default)
-    
+
     def _create_standard_payload(self, event_type: str, **kwargs) -> Dict[str, Any]:
         """Create minimal standardized payload structure."""
         parent_run_id = kwargs.get('parent_run_id')
-        if parent_run_id is None:
-            parent_run_id = ''
-        else:
-            parent_run_id = str(parent_run_id)
-        
+        parent_run_id = str(parent_run_id) if parent_run_id else ''
+
+        tags = kwargs.get('tags', []) or []
+
         return {
             "event_type": event_type,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "execution": {
                 "run_id": str(kwargs.get('run_id', '')),
                 "parent_run_id": parent_run_id,
-                "custom_id": self._extract_custom_id_from_tags(kwargs),
-                "tags": kwargs.get('tags', []) or [],
+                "custom_id": extract_custom_id(tags),
+                "tags": tags,
                 "metadata": kwargs.get('metadata', {}) or {}
             },
-            "data": {},  # Populated by event handlers as needed
+            "data": {},  # Populated by event handlers
             "raw": kwargs.copy()
         }
-    
+
     def _add_error_info(self, payload: Dict[str, Any], error: Exception) -> None:
-        """Add simple error information to payload."""
+        """Add error information to payload."""
         payload["data"]["error"] = {
             "message": str(error),
             "type": type(error).__name__
         }
-    
+
     def _convert_response(self, response: Any) -> Dict[str, Any]:
         """Convert LangChain response to dict format."""
         try:
@@ -185,7 +161,7 @@ class ParquetLogger(BaseCallbackHandler):
                 return {'content': str(response)}
         except Exception as e:
             return {'content': str(response), 'conversion_error': str(e)}
-    
+
     def _log_event(self, payload: Dict[str, Any]) -> None:
         """Create entry and add to buffer."""
         entry = {
@@ -199,7 +175,7 @@ class ParquetLogger(BaseCallbackHandler):
             'payload': self._safe_json_dumps(payload)
         }
         self._add_entry(entry)
-    
+
     def _handle_event(self, event_type: str, primary_data: Dict[str, Any], **kwargs):
         """Generic event handler to reduce duplication."""
         if event_type not in self.event_types:
@@ -210,6 +186,7 @@ class ParquetLogger(BaseCallbackHandler):
         payload["raw"]["primary_args"] = primary_data
         self._log_event(payload)
 
+    # Event handlers
     def on_llm_start(self, serialized: Dict, prompts: List[str], **kwargs):
         """Log LLM start event."""
         data = {
@@ -250,17 +227,14 @@ class ParquetLogger(BaseCallbackHandler):
     def on_chain_start(self, serialized: Dict[str, Any], inputs: Dict[str, Any], **kwargs):
         """Log chain start event."""
         self._handle_event('chain_start', {
-            "config": {
-                "model": serialized.get('name', ''),
-                "type": serialized.get('type', '')
-            },
-            "inputs": {"inputs": inputs},
-            "serialized": serialized
+            "inputs": inputs,
+            "serialized": serialized,
+            "model": serialized.get('name', '')
         }, **kwargs)
 
     def on_chain_end(self, outputs: Dict[str, Any], **kwargs):
         """Log chain end event."""
-        self._handle_event('chain_end', {"outputs": {"outputs": outputs}}, **kwargs)
+        self._handle_event('chain_end', {"outputs": outputs}, **kwargs)
 
     def on_chain_error(self, error: Exception, **kwargs):
         """Log chain error event."""
@@ -275,12 +249,9 @@ class ParquetLogger(BaseCallbackHandler):
     def on_tool_start(self, serialized: Dict[str, Any], input_str: str, **kwargs):
         """Log tool start event."""
         data = {
-            "config": {
-                "model": serialized.get('name', ''),
-                "type": serialized.get('type', '')
-            },
-            "inputs": {"input_str": input_str},
-            "serialized": serialized
+            "input_str": input_str,
+            "serialized": serialized,
+            "model": serialized.get('name', '')
         }
         if 'description' in serialized:
             data["description"] = serialized['description']
@@ -288,7 +259,7 @@ class ParquetLogger(BaseCallbackHandler):
 
     def on_tool_end(self, output: str, **kwargs):
         """Log tool end event."""
-        self._handle_event('tool_end', {"outputs": {"output": output}}, **kwargs)
+        self._handle_event('tool_end', {"output": output}, **kwargs)
 
     def on_tool_error(self, error: Exception, **kwargs):
         """Log tool error event."""
@@ -311,7 +282,7 @@ class ParquetLogger(BaseCallbackHandler):
         else:
             action_data = {'action': str(action)}
 
-        self._handle_event('agent_action', {"inputs": {"action": action_data}}, **kwargs)
+        self._handle_event('agent_action', {"action": action_data}, **kwargs)
 
     def on_agent_finish(self, finish, **kwargs):
         """Log agent finish event."""
@@ -323,8 +294,9 @@ class ParquetLogger(BaseCallbackHandler):
         else:
             finish_data = {'finish': str(finish)}
 
-        self._handle_event('agent_finish', {"outputs": {"finish": finish_data}}, **kwargs)
-    
+        self._handle_event('agent_finish', {"finish": finish_data}, **kwargs)
+
+    # Buffer management
     def _add_entry(self, entry):
         """Add entry to buffer and flush if needed."""
         with self.lock:
@@ -348,119 +320,55 @@ class ParquetLogger(BaseCallbackHandler):
 
         # Release lock before doing I/O
         self._write_buffer(buffer_to_write)
-    
-    def _upload_to_s3(self, table: pa.Table, relative_path: Path):
-        """Upload Parquet table to S3 with retry logic.
-        
-        Args:
-            table: PyArrow table to upload
-            relative_path: Path relative to log_dir for S3 key construction
-        """
-        if not self.s3_bucket:
-            return
-        
-        # Construct S3 key
-        s3_key = f"{self.s3_prefix}{relative_path}"
-        
-        # Attempt upload with retries
-        for attempt in range(self.s3_retry_attempts):
-            try:
-                # Write table to BytesIO buffer
-                buffer = BytesIO()
-                pq.write_table(table, buffer, compression='snappy')
-                buffer.seek(0)
-                
-                # Create S3 client (uses default credential chain)
-                s3_client = boto3.client('s3')
-                
-                # Upload to S3
-                s3_client.put_object(
-                    Bucket=self.s3_bucket,
-                    Key=s3_key,
-                    Body=buffer.getvalue()
-                )
-                
-                return  # Success
-                
-            except Exception as e:
-                if attempt == self.s3_retry_attempts - 1:
-                    # Final attempt failed
-                    error_msg = f"Failed to upload to S3 after {self.s3_retry_attempts} attempts: {e}"
-                    if self.s3_on_failure == "error":
-                        raise RuntimeError(error_msg) from e
-                    else:
-                        print(f"S3 upload failed (continuing): {error_msg}")
-                        return
-                
-                # Exponential backoff before retry
-                time.sleep(2 ** attempt)
-    
+
     def _write_buffer(self, buffer):
         """Write buffer to Parquet file (called without lock held)."""
         try:
-            # Build columns explicitly to avoid type inference and NumPy issues
+            # Build columns explicitly
             ts = pa.array([e["timestamp"] for e in buffer],
                           type=pa.timestamp("us", tz="UTC"))
             run_id = pa.array([e["run_id"] for e in buffer], type=pa.string())
-            # Handle backward compatibility - entries may not have parent_run_id
-            parent_run_id = pa.array([e.get("parent_run_id", "") for e in buffer], type=pa.string())
-            logger_custom_id = pa.array([e["logger_custom_id"] for e in buffer], type=pa.string())
+            parent_run_id = pa.array([e.get("parent_run_id", "") for e in buffer],
+                                    type=pa.string())
+            logger_custom_id = pa.array([e["logger_custom_id"] for e in buffer],
+                                       type=pa.string())
             event_type = pa.array([e["event_type"] for e in buffer], type=pa.string())
             provider = pa.array([e["provider"] for e in buffer], type=pa.string())
-            logger_metadata = pa.array([e["logger_metadata"] for e in buffer], type=pa.string())
+            logger_metadata = pa.array([e["logger_metadata"] for e in buffer],
+                                      type=pa.string())
             payload = pa.array([e["payload"] for e in buffer], type=pa.string())
 
             # Create table with explicit schema
             table = pa.Table.from_arrays(
-                [ts, run_id, parent_run_id, logger_custom_id, event_type, provider, logger_metadata, payload],
+                [ts, run_id, parent_run_id, logger_custom_id, event_type,
+                 provider, logger_metadata, payload],
                 schema=SCHEMA
             )
 
-            # Determine output directory based on partitioning strategy
+            # Determine relative path based on partitioning
             if self.partition_on == "date":
-                # Daily partitioning
                 today = date.today()
-                output_dir = self.log_dir / f"date={today}"
-                output_dir.mkdir(parents=True, exist_ok=True)
+                relative_path = Path(f"date={today}") / f"logs_{datetime.now().strftime('%H%M%S_%f')}.parquet"
             else:
-                # No partitioning - save directly to log_dir
-                output_dir = self.log_dir
+                relative_path = Path(f"logs_{datetime.now().strftime('%H%M%S_%f')}.parquet")
 
-            # Unique filename
-            timestamp = datetime.now().strftime('%H%M%S_%f')
-            filepath = output_dir / f"logs_{timestamp}.parquet"
-
-            # Write to Parquet
-            pq.write_table(table, filepath, compression='snappy')
-
-            # Upload to S3 if configured
-            if self.s3_bucket:
-                # Calculate relative path for S3 key
-                relative_path = filepath.relative_to(self.log_dir)
-                self._upload_to_s3(table, relative_path)
+            # Write using storage backend
+            self.storage.write(table, relative_path)
 
         except RuntimeError:
-            # Re-raise S3 errors when in error mode
+            # Re-raise storage errors
             raise
         except Exception as e:
             import traceback
             print(f"Failed to write logs: {e}")
             print(f"Full traceback:\n{traceback.format_exc()}")
-    
+
+    # Context manager support
     def __enter__(self):
         """Context manager entry."""
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit - ensure buffer is flushed."""
-        _ = (exc_type, exc_val, exc_tb)  # Unused but required by protocol
         self.flush()
         return False
-    
-    def __del__(self):
-        """Last resort flush on garbage collection."""
-        try:
-            if self.buffer:
-                self.flush()
-        except:
-            pass  # Best effort, don't raise in destructor
