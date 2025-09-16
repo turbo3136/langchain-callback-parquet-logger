@@ -10,7 +10,7 @@ from .config import (
     ColumnConfig,
     EventType,
 )
-from .batch import batch_run, batch_process, batch_process_simple
+from .batch import batch_run, batch_process
 
 # Optional imports with better error messages
 try:
@@ -30,7 +30,6 @@ __all__ = [
     # Batch processing
     'batch_run',
     'batch_process',
-    'batch_process_simple',
 
     # Configurations
     'S3Config',

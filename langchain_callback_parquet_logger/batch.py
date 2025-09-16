@@ -28,9 +28,10 @@ async def batch_run(
     return_results: bool = True,
 ) -> Optional[list]:
     """
-    Minimal batch runner for DataFrames with LLMs.
+    Low-level async batch processing for DataFrames.
 
-    Users prepare all data in DataFrame columns, this just handles async batching.
+    **Most users should use batch_process() instead**, which includes automatic logging.
+    Use batch_run() only when you need direct control over logging.
 
     Args:
         df: DataFrame with prepared data
@@ -47,15 +48,13 @@ async def batch_run(
         List of results in same order as DataFrame rows, or None if return_results=False
 
     Example:
-        >>> # Normal usage - keep results
-        >>> results = await batch_run(df, llm, max_concurrency=100)
-        >>> df['result'] = results
-        >>>
-        >>> # Memory-efficient for huge DataFrames (results only in ParquetLogger)
+        >>> # When you already have logging configured:
         >>> with ParquetLogger('./logs') as logger:
         >>>     llm.callbacks = [logger]
-        >>>     await batch_run(huge_df, llm, return_results=False)
-        >>>     # Results are in parquet files, not memory
+        >>>     results = await batch_run(df, llm, max_concurrency=100)
+        >>>
+        >>> # For most users, use batch_process() instead:
+        >>> results = await batch_process(df)  # Logging handled automatically
     """
     rows = df.to_dict('records')
 
@@ -315,43 +314,3 @@ def _detect_llm_provider(llm: Any) -> str:
         'AzureChatOpenAI': 'azure',
     }
     return provider_map.get(llm_class_name, 'unknown')
-
-
-async def batch_process_simple(
-    df: pd.DataFrame,
-    category: str = "batch_processing",
-    s3_bucket: Optional[str] = None,
-    max_concurrency: int = 100,
-    **kwargs
-) -> Optional[List]:
-    """
-    Simplified batch processing interface for common use cases.
-
-    Args:
-        df: DataFrame with 'prompt' and optional 'config' columns
-        category: Job category for organizing logs
-        s3_bucket: Optional S3 bucket for uploading logs
-        max_concurrency: Maximum concurrent requests
-        **kwargs: Additional arguments passed to batch_process
-
-    Returns:
-        List of results or None
-
-    Example:
-        >>> results = await batch_process_simple(df, category="research", s3_bucket="my-bucket")
-    """
-    job_config = JobConfig(category=category)
-
-    storage_config = StorageConfig()
-    if s3_bucket:
-        storage_config.s3_config = S3Config(bucket=s3_bucket)
-
-    processing_config = ProcessingConfig(max_concurrency=max_concurrency)
-
-    return await batch_process(
-        df,
-        job_config=job_config,
-        storage_config=storage_config,
-        processing_config=processing_config,
-        **kwargs
-    )
