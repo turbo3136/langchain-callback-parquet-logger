@@ -100,6 +100,26 @@ class ParquetLogger(BaseCallbackHandler):
         except ImportError:
             return False
 
+    def _serialize_any(self, obj: Any) -> Any:
+        """Try all possible serialization methods for complete data capture."""
+        try:
+            # Try various serialization methods in order of preference
+            if hasattr(obj, 'model_dump'):  # Pydantic v2
+                return obj.model_dump()
+            elif hasattr(obj, 'dict'):  # Pydantic v1 / LangChain objects
+                return obj.dict()
+            elif hasattr(obj, 'to_dict'):
+                return obj.to_dict()
+            elif hasattr(obj, '__dict__'):
+                # Get object attributes (skip private ones)
+                return {k: v for k, v in obj.__dict__.items() if not k.startswith('_')}
+            else:
+                # Return as-is, let _safe_json_dumps handle edge cases
+                return obj
+        except Exception:
+            # If all else fails, return as-is
+            return obj
+
     def _safe_json_dumps(self, obj: Any) -> str:
         """Convert object to JSON string safely."""
         def default(o):
@@ -170,12 +190,13 @@ class ParquetLogger(BaseCallbackHandler):
 
         payload = self._create_standard_payload(event_type, **kwargs)
         payload["data"] = primary_data
-        payload["raw"]["primary_args"] = primary_data
+        # Raw already has kwargs from _create_standard_payload
         self._log_event(payload)
 
     # Event handlers
     def on_llm_start(self, serialized: Dict, prompts: List[str], **kwargs):
         """Log LLM start event."""
+        # Keep structured data for easy access
         data = {
             "prompts": prompts,
             "llm_type": serialized.get('_type', 'unknown'),  # Extract LangChain's native _type
@@ -186,10 +207,15 @@ class ParquetLogger(BaseCallbackHandler):
         }
         if 'messages' in kwargs:
             data["messages"] = kwargs['messages']
+
+        # Capture everything in raw
+        kwargs['serialized'] = serialized
+        kwargs['prompts'] = prompts
         self._handle_event('llm_start', data, **kwargs)
 
     def on_llm_end(self, response, **kwargs):
         """Log LLM end event."""
+        # Keep structured data for easy access
         response_data = self._convert_response(response)
         data = {"response": response_data}
 
@@ -200,6 +226,8 @@ class ParquetLogger(BaseCallbackHandler):
         if hasattr(response, 'response_metadata'):
             data["response_metadata"] = response.response_metadata
 
+        # Capture complete response in raw
+        kwargs['response'] = self._serialize_any(response)
         self._handle_event('llm_end', data, **kwargs)
 
     def on_llm_error(self, error, **kwargs):
@@ -209,19 +237,26 @@ class ParquetLogger(BaseCallbackHandler):
 
         payload = self._create_standard_payload('llm_error', **kwargs)
         self._add_error_info(payload, error)
-        payload["raw"]["primary_args"] = {"error": str(error)}
+        # Capture complete error in raw
+        payload["raw"]["error"] = self._serialize_any(error)
         self._log_event(payload)
 
     def on_chain_start(self, serialized: Dict[str, Any], inputs: Dict[str, Any], **kwargs):
         """Log chain start event."""
-        self._handle_event('chain_start', {
+        data = {
             "inputs": inputs,
             "serialized": serialized,
             "model": serialized.get('name', '')
-        }, **kwargs)
+        }
+        # Capture everything in raw
+        kwargs['serialized'] = serialized
+        kwargs['inputs'] = inputs
+        self._handle_event('chain_start', data, **kwargs)
 
     def on_chain_end(self, outputs: Dict[str, Any], **kwargs):
         """Log chain end event."""
+        # Capture everything in raw
+        kwargs['outputs'] = self._serialize_any(outputs)
         self._handle_event('chain_end', {"outputs": outputs}, **kwargs)
 
     def on_chain_error(self, error: Exception, **kwargs):
@@ -231,7 +266,8 @@ class ParquetLogger(BaseCallbackHandler):
 
         payload = self._create_standard_payload('chain_error', **kwargs)
         self._add_error_info(payload, error)
-        payload["raw"]["primary_args"] = {"error": str(error)}
+        # Capture complete error in raw
+        payload["raw"]["error"] = self._serialize_any(error)
         self._log_event(payload)
 
     def on_tool_start(self, serialized: Dict[str, Any], input_str: str, **kwargs):
@@ -243,10 +279,15 @@ class ParquetLogger(BaseCallbackHandler):
         }
         if 'description' in serialized:
             data["description"] = serialized['description']
+        # Capture everything in raw
+        kwargs['serialized'] = serialized
+        kwargs['input_str'] = input_str
         self._handle_event('tool_start', data, **kwargs)
 
     def on_tool_end(self, output: str, **kwargs):
         """Log tool end event."""
+        # Capture everything in raw
+        kwargs['output'] = self._serialize_any(output)
         self._handle_event('tool_end', {"output": output}, **kwargs)
 
     def on_tool_error(self, error: Exception, **kwargs):
@@ -256,11 +297,13 @@ class ParquetLogger(BaseCallbackHandler):
 
         payload = self._create_standard_payload('tool_error', **kwargs)
         self._add_error_info(payload, error)
-        payload["raw"]["primary_args"] = {"error": str(error)}
+        # Capture complete error in raw
+        payload["raw"]["error"] = self._serialize_any(error)
         self._log_event(payload)
 
     def on_agent_action(self, action, **kwargs):
         """Log agent action event."""
+        # Keep structured data for easy access
         if hasattr(action, '__dict__'):
             action_data = {
                 'tool': getattr(action, 'tool', ''),
@@ -270,10 +313,13 @@ class ParquetLogger(BaseCallbackHandler):
         else:
             action_data = {'action': str(action)}
 
+        # Capture complete action in raw
+        kwargs['action'] = self._serialize_any(action)
         self._handle_event('agent_action', {"action": action_data}, **kwargs)
 
     def on_agent_finish(self, finish, **kwargs):
         """Log agent finish event."""
+        # Keep structured data for easy access
         if hasattr(finish, '__dict__'):
             finish_data = {
                 'return_values': getattr(finish, 'return_values', {}),
@@ -282,6 +328,8 @@ class ParquetLogger(BaseCallbackHandler):
         else:
             finish_data = {'finish': str(finish)}
 
+        # Capture complete finish in raw
+        kwargs['finish'] = self._serialize_any(finish)
         self._handle_event('agent_finish', {"finish": finish_data}, **kwargs)
 
     # Buffer management

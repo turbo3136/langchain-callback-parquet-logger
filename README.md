@@ -263,6 +263,14 @@ All events use a consistent JSON structure in the payload column:
         "llm_type": "openai-chat",  // LangChain's native LLM type
         "response": {"content": "..."},
         "usage": {"total_tokens": 100}
+    },
+    "raw": {
+        // Complete dump of all callback arguments
+        // Includes all kwargs plus positional args (serialized when possible)
+        "response": {"generations": [...], "llm_output": {...}},
+        "run_id": "uuid-here",
+        "parent_run_id": "",
+        // ... all other arguments passed to the callback
     }
 }
 ```
