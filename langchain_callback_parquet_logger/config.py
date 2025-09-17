@@ -90,4 +90,3 @@ class ColumnConfig:
 
 # Constants
 CUSTOM_ID_PREFIX = "logger_custom_id:"
-DEFAULT_PROVIDER = "openai"

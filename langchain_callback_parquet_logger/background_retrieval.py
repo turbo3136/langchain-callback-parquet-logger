@@ -148,9 +148,9 @@ async def retrieve_background_responses(
             logger._add_entry({
                 'timestamp': datetime.now(timezone.utc),
                 'run_id': '',
+                'parent_run_id': '',
                 'logger_custom_id': custom_id,
                 'event_type': 'background_retrieval_attempt',
-                'provider': 'openai',
                 'logger_metadata': logger.logger_metadata_json,
                 'payload': json.dumps({
                     'response_id': response_id,
@@ -189,9 +189,9 @@ async def retrieve_background_responses(
                     logger._add_entry({
                         'timestamp': datetime.now(timezone.utc),
                         'run_id': '',
+                        'parent_run_id': '',
                         'logger_custom_id': custom_id,
                         'event_type': 'background_retrieval_complete',
-                        'provider': 'openai',
                         'logger_metadata': logger.logger_metadata_json,
                         'payload': json.dumps({
                             'response_id': response_id,
@@ -245,9 +245,9 @@ async def retrieve_background_responses(
             logger._add_entry({
                 'timestamp': datetime.now(timezone.utc),
                 'run_id': '',
+                'parent_run_id': '',
                 'logger_custom_id': custom_id,
                 'event_type': 'background_retrieval_error',
-                'provider': 'openai',
                 'logger_metadata': logger.logger_metadata_json,
                 'payload': json.dumps({
                     'response_id': response_id,

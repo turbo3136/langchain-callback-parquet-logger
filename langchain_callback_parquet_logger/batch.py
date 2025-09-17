@@ -209,9 +209,6 @@ async def batch_process(
     if structured_output:
         llm = llm.with_structured_output(structured_output)
 
-    # Auto-detect provider
-    provider = _detect_llm_provider(llm)
-
     # Format path templates with job metadata
     template_vars = {
         'job_category': job_config.category,
@@ -244,7 +241,6 @@ async def batch_process(
         'job_subcategory': job_config.subcategory,
         'job_description': job_config.description,
         'job_version': job_config.version,
-        'provider': provider,
         **job_config.metadata
     }
 
@@ -301,16 +297,3 @@ async def batch_process(
 
     return results
 
-
-def _detect_llm_provider(llm: Any) -> str:
-    """Auto-detect LLM provider from instance."""
-    llm_class_name = llm.__class__.__name__
-    provider_map = {
-        'ChatOpenAI': 'openai',
-        'ChatAnthropic': 'anthropic',
-        'ChatCohere': 'cohere',
-        'ChatGoogleGenerativeAI': 'google',
-        'ChatVertexAI': 'google',
-        'AzureChatOpenAI': 'azure',
-    }
-    return provider_map.get(llm_class_name, 'unknown')

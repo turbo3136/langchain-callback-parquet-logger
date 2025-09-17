@@ -242,7 +242,6 @@ with ParquetLogger('./logs', buffer_size=1) as logger:
 | `parent_run_id` | string | Parent run ID for nested calls |
 | `logger_custom_id` | string | Your custom tracking ID |
 | `event_type` | string | Event type (llm_start, llm_end, etc.) |
-| `provider` | string | LLM provider (auto-detected) |
 | `logger_metadata` | string | JSON metadata |
 | `payload` | string | Full event data as JSON |
 
@@ -261,6 +260,7 @@ All events use a consistent JSON structure in the payload column:
     },
     "data": {
         "prompts": ["..."],
+        "llm_type": "openai-chat",  // LangChain's native LLM type
         "response": {"content": "..."},
         "usage": {"total_tokens": 100}
     }

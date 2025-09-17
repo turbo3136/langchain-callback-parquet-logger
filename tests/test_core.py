@@ -48,7 +48,7 @@ class TestParquetLogger:
             'run_id': 'run-1',
             'logger_custom_id': '',
             'event_type': 'test1',
-            'provider': 'test',
+            'parent_run_id': '',
             'logger_metadata': '{}',
             'payload': '{}'
         })
@@ -63,7 +63,7 @@ class TestParquetLogger:
             'run_id': 'run-2',
             'logger_custom_id': '',
             'event_type': 'test2',
-            'provider': 'test',
+            'parent_run_id': '',
             'logger_metadata': '{}',
             'payload': '{}'
         })
@@ -82,7 +82,7 @@ class TestParquetLogger:
             'run_id': 'run-1',
             'logger_custom_id': '',
             'event_type': 'test',
-            'provider': 'test',
+            'parent_run_id': '',
             'logger_metadata': '{}',
             'payload': '{}'
         })
@@ -102,7 +102,7 @@ class TestParquetLogger:
                 'run_id': 'run-1',
                 'logger_custom_id': '',
                 'event_type': 'test',
-                'provider': 'test',
+                'parent_run_id': '',
                 'logger_metadata': '{}',
                 'payload': '{}'
             })
@@ -123,7 +123,7 @@ class TestParquetLogger:
             'run_id': 'run-1',
             'logger_custom_id': '',
             'event_type': 'test',
-            'provider': 'test',
+            'parent_run_id': '',
             'logger_metadata': '{}',
             'payload': '{}'
         })
@@ -145,7 +145,7 @@ class TestParquetLogger:
             'run_id': 'run-1',
             'logger_custom_id': '',
             'event_type': 'test',
-            'provider': 'test',
+            'parent_run_id': '',
             'logger_metadata': '{}',
             'payload': '{}'
         })
@@ -172,7 +172,7 @@ class TestParquetLogger:
             'run_id': 'run-1',
             'logger_custom_id': '',
             'event_type': 'test',
-            'provider': 'test',
+            'parent_run_id': '',
             'logger_metadata': json.dumps(metadata),
             'payload': '{}'
         })

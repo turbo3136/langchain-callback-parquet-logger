@@ -117,31 +117,26 @@ class TestBatchProcess:
             assert len(results) == len(df)
     
     @pytest.mark.asyncio
-    async def test_batch_process_auto_detect_provider(self, sample_dataframe):
-        """Test that provider is auto-detected from LLM class."""
+    async def test_batch_process_llm_types(self, sample_dataframe):
+        """Test that different LLM classes work with batch processing."""
         df = sample_dataframe.copy()
         df['prompt'] = df['text']
         df['config'] = df['id'].apply(lambda x: with_tags(custom_id=str(x)))
-        
+
         # Test different LLM classes
-        for llm_class_name, expected_provider in [
-            ('ChatOpenAI', 'openai'),
-            ('ChatAnthropic', 'anthropic'),
-            ('ChatCohere', 'cohere'),
-            ('UnknownLLM', 'unknown')
-        ]:
+        for llm_class_name in ['ChatOpenAI', 'ChatAnthropic', 'ChatCohere', 'UnknownLLM']:
             mock_llm = AsyncMock()
             mock_llm.__class__.__name__ = llm_class_name
             mock_llm.callbacks = []
             mock_llm.ainvoke = AsyncMock(return_value=Mock(content="response"))
-            
+
             with tempfile.TemporaryDirectory() as tmpdir:
                 with patch('langchain_callback_parquet_logger.batch_helpers.ParquetLogger') as MockLogger:
                     mock_logger_instance = MagicMock()
                     MockLogger.return_value = mock_logger_instance
                     mock_logger_instance.__enter__ = Mock(return_value=mock_logger_instance)
                     mock_logger_instance.__exit__ = Mock(return_value=None)
-                    
+
                     await batch_process(
                         df,
                         llm=mock_llm,
@@ -149,12 +144,10 @@ class TestBatchProcess:
                         show_progress=False,
                         buffer_size=1000
                     )
-                    
-                    # Check that ParquetLogger was called with correct provider
+
+                    # Check that ParquetLogger was called
                     assert MockLogger.called
-                    if MockLogger.call_args:
-                        call_kwargs = MockLogger.call_args.kwargs
-                        assert call_kwargs['provider'] == expected_provider
+                    # Provider detection has been removed, so we don't check for it
     
     @pytest.mark.asyncio
     async def test_batch_process_path_templates(self, sample_dataframe):

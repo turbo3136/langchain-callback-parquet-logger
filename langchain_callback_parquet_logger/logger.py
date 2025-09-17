@@ -13,7 +13,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from langchain_core.callbacks import BaseCallbackHandler
 
-from .config import S3Config, EventType, DEFAULT_PROVIDER
+from .config import S3Config, EventType
 from .storage import create_storage, StorageBackend
 from .tagging import extract_custom_id
 
@@ -25,7 +25,6 @@ SCHEMA = pa.schema([
     ("parent_run_id", pa.string()),
     ("logger_custom_id", pa.string()),
     ("event_type", pa.string()),
-    ("provider", pa.string()),
     ("logger_metadata", pa.string()),
     ("payload", pa.string()),
 ])
@@ -73,9 +72,6 @@ class ParquetLogger(BaseCallbackHandler):
         # Create storage backend
         self.storage = create_storage(log_dir, s3_config)
 
-        # Auto-detect provider from metadata or use default
-        self.provider = self._detect_provider()
-
         # Safely serialize metadata
         try:
             self.logger_metadata_json = json.dumps(self.logger_metadata, default=str)
@@ -95,14 +91,6 @@ class ParquetLogger(BaseCallbackHandler):
                 "Use context manager or call flush() for immediate writes.",
                 stacklevel=2
             )
-
-    def _detect_provider(self) -> str:
-        """Auto-detect provider from metadata or return default."""
-        if 'provider' in self.logger_metadata:
-            return self.logger_metadata['provider']
-        if 'llm_provider' in self.logger_metadata:
-            return self.logger_metadata['llm_provider']
-        return DEFAULT_PROVIDER
 
     def _is_notebook(self) -> bool:
         """Detect if running in a notebook environment."""
@@ -170,7 +158,6 @@ class ParquetLogger(BaseCallbackHandler):
             'parent_run_id': payload["execution"]["parent_run_id"],
             'logger_custom_id': payload["execution"]["custom_id"],
             'event_type': payload["event_type"],
-            'provider': self.provider,
             'logger_metadata': self.logger_metadata_json,
             'payload': self._safe_json_dumps(payload)
         }
@@ -191,6 +178,7 @@ class ParquetLogger(BaseCallbackHandler):
         """Log LLM start event."""
         data = {
             "prompts": prompts,
+            "llm_type": serialized.get('_type', 'unknown'),  # Extract LangChain's native _type
             "serialized": serialized,
             "model": serialized.get('kwargs', {}).get('model_name', ''),
             "invocation_params": serialized.get('kwargs', {}),
@@ -333,7 +321,6 @@ class ParquetLogger(BaseCallbackHandler):
             logger_custom_id = pa.array([e["logger_custom_id"] for e in buffer],
                                        type=pa.string())
             event_type = pa.array([e["event_type"] for e in buffer], type=pa.string())
-            provider = pa.array([e["provider"] for e in buffer], type=pa.string())
             logger_metadata = pa.array([e["logger_metadata"] for e in buffer],
                                       type=pa.string())
             payload = pa.array([e["payload"] for e in buffer], type=pa.string())
@@ -341,7 +328,7 @@ class ParquetLogger(BaseCallbackHandler):
             # Create table with explicit schema
             table = pa.Table.from_arrays(
                 [ts, run_id, parent_run_id, logger_custom_id, event_type,
-                 provider, logger_metadata, payload],
+                 logger_metadata, payload],
                 schema=SCHEMA
             )
 
