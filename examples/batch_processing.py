@@ -50,9 +50,8 @@ async def process_dataframe(
     logger_config = {
         "log_dir": log_dir,
         "buffer_size": 100 if not memory_efficient else 500,
-        "provider": "openai",
         "logger_metadata": logger_metadata or {"batch_size": len(df), "model": model},
-        "event_types": ['llm_start', 'llm_end', 'llm_error']  # v1.0.0 explicit event types
+        "event_types": ['llm_start', 'llm_end', 'llm_error']  # v2.0.0 explicit event types
     }
     
     if s3_bucket:

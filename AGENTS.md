@@ -55,13 +55,18 @@ This package provides a high-performance callback handler for logging LangChain 
   - Tool events: on_tool_start, on_tool_end, on_tool_error
   - Agent events: on_agent_action, on_agent_finish
   - Configurable via `event_types` parameter (defaults to LLM events only for backward compatibility)
-- **Schema**: 8 columns with hierarchy support
-  - timestamp, run_id, parent_run_id, logger_custom_id, event_type, provider, logger_metadata, payload
+- **Schema**: 7 columns with hierarchy support
+  - timestamp, run_id, parent_run_id, logger_custom_id, event_type, logger_metadata, payload
   - `parent_run_id` enables tracking of execution hierarchy (chains → LLMs → tools)
+  - LLM type is captured in the payload's `llm_type` field for llm_start events
 - Buffers entries in memory (configurable size) before flushing to Parquet files
 - Thread-safe with lock-based synchronization
 - Supports daily partitioning (date=YYYY-MM-DD) or flat structure
 - All event data stored as JSON strings in the payload column for flexibility
+- **Raw Data Capture (v2.0+)**: Complete callback data captured in `raw` section of payload
+  - All positional arguments and kwargs are serialized and stored
+  - Uses `_serialize_any()` helper to try all serialization methods (model_dump, dict, to_dict, __dict__)
+  - Ensures no information is lost while keeping `data` section clean and structured
 - **S3 Support (v0.6.0+)**: Optional upload to S3 with retry logic and configurable failure handling
 
 ### 2. Batch Processing (`batch_helpers.py`)
@@ -90,7 +95,7 @@ This package provides a high-performance callback handler for logging LangChain 
 - **Storage Flexibility**: Supports local-only or local + S3 storage modes
 - **Job Metadata**: Automatic organization with job categories, subcategories, versions, and environments
 - **Path Templates**: Flexible path formatting with template variables
-- **LLM Auto-Configuration**: Automatic LLM creation and provider detection
+- **LLM Auto-Configuration**: Automatic LLM creation
 - **Structured Output**: Built-in support for Pydantic models
 - **Full Parameter Control**: Exposes all ParquetLogger and batch_run parameters
 - **Override Support**: Escape hatches for advanced customization

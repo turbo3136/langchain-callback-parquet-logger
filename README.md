@@ -60,7 +60,23 @@ response = llm.invoke(
 )
 ```
 
-### 2. Batch Processing (Complete Example)
+### 2. Batch Processing (Simple)
+
+```python
+import pandas as pd
+from langchain_callback_parquet_logger import batch_process, with_tags
+
+# Prepare your data
+df = pd.DataFrame({
+    'prompt': ['What is AI?', 'Explain DNA'],
+    'config': [with_tags(custom_id='q1'), with_tags(custom_id='q2')]
+})
+
+# Process with automatic logging
+results = await batch_process(df)
+```
+
+### 3. Batch Processing (Full Configuration)
 
 ```python
 import pandas as pd
@@ -69,30 +85,69 @@ from langchain_callback_parquet_logger import (
     with_tags,
     JobConfig,
     StorageConfig,
+    ProcessingConfig,
+    ColumnConfig,
     S3Config
 )
 
-# Prepare your data
+# Prepare your data with custom column names
 df = pd.DataFrame({
     'question': ['What is AI?', 'Explain DNA', 'What is quantum computing?'],
-    'user_id': ['user1', 'user2', 'user3']
+    'user_id': ['user1', 'user2', 'user3'],
+    'tool_list': [[tool1, tool2], None, [tool3]]  # Optional tools
 })
 
-# Add required columns
-df['prompt'] = df['question']  # Required column name
-df['config'] = df['user_id'].apply(lambda x: with_tags(custom_id=x))
+# Add config for each row (required)
+df['run_config'] = df['user_id'].apply(lambda x: with_tags(
+    custom_id=x,
+    tags=['production', 'v2']
+))
 
-# Process with full configuration
+# Process with ALL configuration options
 results = await batch_process(
     df,
+    # LLM configuration
+    llm_model='gpt-4',  # or pass existing LLM instance
+    structured_output=None,  # or Pydantic model for structured responses
+
+    # Job metadata configuration
     job_config=JobConfig(
         category="research",
         subcategory="science",
-        version="2.0.0"
+        description="Analyzing scientific questions",
+        version="2.0.0",
+        environment="production",
+        metadata={"team": "data-science", "priority": "high"}
     ),
+
+    # Storage configuration
     storage_config=StorageConfig(
         output_dir="./batch_logs",
-        s3_config=S3Config(bucket="my-llm-logs")  # Optional S3 upload
+        path_template="{job_category}/{date}/{job_subcategory}",  # Custom path structure
+        s3_config=S3Config(
+            bucket="my-llm-logs",
+            prefix="langchain-logs/",
+            on_failure="continue",  # or "error" to fail on S3 errors
+            retry_attempts=3
+        )
+    ),
+
+    # Processing configuration
+    processing_config=ProcessingConfig(
+        max_concurrency=100,  # Parallel requests
+        buffer_size=1000,  # Logger buffer size
+        show_progress=True,  # Progress bar
+        return_exceptions=True,  # Don't fail on single errors
+        return_results=True,  # Set False for huge datasets to save memory
+        event_types=['llm_start', 'llm_end', 'llm_error'],  # Events to log
+        partition_on="date"  # Partition strategy
+    ),
+
+    # Column name configuration (if not using defaults)
+    column_config=ColumnConfig(
+        prompt="question",  # Your prompt column name
+        config="run_config",  # Your config column name
+        tools="tool_list"  # Your tools column name (optional)
     )
 )
 
@@ -100,7 +155,7 @@ results = await batch_process(
 df['answer'] = results
 ```
 
-### 3. S3 Upload
+### 4. S3 Upload
 
 For production and cloud environments:
 
@@ -117,7 +172,7 @@ logger = ParquetLogger(
 )
 ```
 
-### 4. Event Type Selection
+### 5. Event Type Selection
 
 Choose what events to log:
 

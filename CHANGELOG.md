@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.0.0] - 2025-01-17
 
+### Added
+- Complete data capture in `raw` payload section
+- `_serialize_any()` helper for comprehensive object serialization
+- All callback arguments now captured in raw (positional + kwargs)
+- Tests for raw data capture verification
+
 ### Changed (BREAKING)
 - **BREAKING**: Removed `provider` column from Parquet schema (8 columns → 7 columns)
 - **BREAKING**: Provider detection has been completely removed in favor of using LangChain's native `_llm_type`
