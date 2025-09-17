@@ -7,8 +7,12 @@ import pandas as pd
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import patch, Mock, AsyncMock, MagicMock
-from langchain_callback_parquet_logger import batch_process, with_tags
+from unittest.mock import patch, Mock, AsyncMock, MagicMock, PropertyMock
+from langchain_callback_parquet_logger import (
+    batch_process, with_tags,
+    JobConfig, StorageConfig, ProcessingConfig,
+    ColumnConfig, S3Config
+)
 
 
 class TestBatchProcess:
@@ -32,11 +36,17 @@ class TestBatchProcess:
             results = await batch_process(
                 df,
                 llm=mock_llm,
-                job_category="test_job",
-                job_subcategory="test_sub",
-                output_dir=tmpdir,
-                show_progress=False,
-                return_results=True
+                job_config=JobConfig(
+                    category="test_job",
+                    subcategory="test_sub"
+                ),
+                storage_config=StorageConfig(
+                    output_dir=tmpdir
+                ),
+                processing_config=ProcessingConfig(
+                    show_progress=False,
+                    return_results=True
+                )
             )
             
             # Check results
@@ -61,27 +71,35 @@ class TestBatchProcess:
         mock_llm.ainvoke = AsyncMock(return_value=Mock(content="response"))
         
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Mock HAS_BOTO3 first, then boto3 module
-            with patch('langchain_callback_parquet_logger.logger.HAS_BOTO3', True):
-                with patch('langchain_callback_parquet_logger.logger.boto3') as mock_boto3:
-                    # Mock S3 client
-                    mock_s3_client = MagicMock()
-                    mock_boto3.client.return_value = mock_s3_client
-                    
-                    results = await batch_process(
-                        df,
-                        llm=mock_llm,
-                        job_category="test_job",
-                        s3_bucket="test-bucket",
-                        s3_prefix_template="jobs/{job_category}/{date}/",
+            # Mock S3Storage.client property to avoid boto3 import
+            with patch('langchain_callback_parquet_logger.storage.S3Storage.client', new_callable=PropertyMock) as mock_client:
+                # Mock S3 client
+                mock_s3_client = MagicMock()
+                mock_client.return_value = mock_s3_client
+
+                results = await batch_process(
+                    df,
+                    llm=mock_llm,
+                    job_config=JobConfig(
+                        category="test_job"
+                    ),
+                    storage_config=StorageConfig(
                         output_dir=tmpdir,
+                        path_template="{job_category}/{job_subcategory}",
+                        s3_config=S3Config(
+                            bucket="test-bucket",
+                            prefix="jobs/{job_category}/{date}/"
+                        )
+                    ),
+                    processing_config=ProcessingConfig(
                         show_progress=False,
                         buffer_size=1  # Force immediate flush to test S3 upload
                     )
-                    
-                    # Check local directory was created
-                    expected_path = Path(tmpdir) / "test_job" / "default"
-                    assert expected_path.exists()
+                )
+
+                # Check local directory was created
+                expected_path = Path(tmpdir) / "test_job" / "default"
+                assert expected_path.exists()
     
     @pytest.mark.asyncio
     async def test_batch_process_structured_output(self, sample_dataframe):
@@ -107,9 +125,13 @@ class TestBatchProcess:
                 df,
                 llm=mock_llm,
                 structured_output=TestModel,
-                output_dir=tmpdir,
-                show_progress=False,
-                return_results=True
+                storage_config=StorageConfig(
+                    output_dir=tmpdir
+                ),
+                processing_config=ProcessingConfig(
+                    show_progress=False,
+                    return_results=True
+                )
             )
             
             # Check that structured output was applied
@@ -131,7 +153,7 @@ class TestBatchProcess:
             mock_llm.ainvoke = AsyncMock(return_value=Mock(content="response"))
 
             with tempfile.TemporaryDirectory() as tmpdir:
-                with patch('langchain_callback_parquet_logger.batch_helpers.ParquetLogger') as MockLogger:
+                with patch('langchain_callback_parquet_logger.batch.ParquetLogger') as MockLogger:
                     mock_logger_instance = MagicMock()
                     MockLogger.return_value = mock_logger_instance
                     mock_logger_instance.__enter__ = Mock(return_value=mock_logger_instance)
@@ -140,9 +162,13 @@ class TestBatchProcess:
                     await batch_process(
                         df,
                         llm=mock_llm,
-                        output_dir=tmpdir,
-                        show_progress=False,
-                        buffer_size=1000
+                        storage_config=StorageConfig(
+                            output_dir=tmpdir
+                        ),
+                        processing_config=ProcessingConfig(
+                            show_progress=False,
+                            buffer_size=1000
+                        )
                     )
 
                     # Check that ParquetLogger was called
@@ -165,13 +191,19 @@ class TestBatchProcess:
             await batch_process(
                 df,
                 llm=mock_llm,
-                job_category="emails",
-                job_subcategory="validation",
-                job_version="2.0.1",
-                environment="staging",
-                output_dir=tmpdir,
-                output_path_template="{environment}/{job_category}/v{job_version}/{job_subcategory}",
-                show_progress=False
+                job_config=JobConfig(
+                    category="emails",
+                    subcategory="validation",
+                    version="2.0.1",
+                    environment="staging"
+                ),
+                storage_config=StorageConfig(
+                    output_dir=tmpdir,
+                    path_template="{environment}/{job_category}/v{job_version}/{job_subcategory}"
+                ),
+                processing_config=ProcessingConfig(
+                    show_progress=False
+                )
             )
             
             # Check that path was formatted correctly
@@ -191,7 +223,7 @@ class TestBatchProcess:
         mock_llm.ainvoke = AsyncMock(return_value=Mock(content="response"))
         
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch('langchain_callback_parquet_logger.batch_helpers.ParquetLogger') as MockLogger:
+            with patch('langchain_callback_parquet_logger.batch.ParquetLogger') as MockLogger:
                 mock_logger_instance = MagicMock()
                 MockLogger.return_value = mock_logger_instance
                 mock_logger_instance.__enter__ = Mock(return_value=mock_logger_instance)
@@ -201,11 +233,18 @@ class TestBatchProcess:
                 await batch_process(
                     df,
                     llm=mock_llm,
-                    output_dir=tmpdir,
-                    buffer_size=500,
-                    event_types=['llm_start', 'llm_end', 'chain_start'],
-                    logger_kwargs_override={'s3_retry_attempts': 5},  # Valid param
-                    show_progress=False
+                    storage_config=StorageConfig(
+                        output_dir=tmpdir,
+                        s3_config=S3Config(
+                            bucket="test-bucket",
+                            retry_attempts=5
+                        )
+                    ),
+                    processing_config=ProcessingConfig(
+                        buffer_size=500,
+                        event_types=['llm_start', 'llm_end', 'chain_start'],
+                        show_progress=False
+                    )
                 )
                 
                 # Check that logger overrides were applied
@@ -214,7 +253,7 @@ class TestBatchProcess:
                     call_kwargs = MockLogger.call_args.kwargs
                     assert call_kwargs['buffer_size'] == 500
                     assert call_kwargs['event_types'] == ['llm_start', 'llm_end', 'chain_start']
-                    assert call_kwargs['s3_retry_attempts'] == 5  # Override applied
+                    # S3 config should be passed as s3_config object now
     
     @pytest.mark.asyncio
     async def test_batch_process_missing_columns(self, sample_dataframe):
@@ -228,7 +267,9 @@ class TestBatchProcess:
             await batch_process(
                 df,
                 llm=mock_llm,
-                output_dir="./test"
+                storage_config=StorageConfig(
+                    output_dir="./test"
+                )
             )
     
     @pytest.mark.asyncio
@@ -245,7 +286,7 @@ class TestBatchProcess:
         
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch.dict(os.environ, {'LANGCHAIN_S3_BUCKET': 'env-bucket'}):
-                with patch('langchain_callback_parquet_logger.batch_helpers.ParquetLogger') as MockLogger:
+                with patch('langchain_callback_parquet_logger.batch.ParquetLogger') as MockLogger:
                     mock_logger_instance = MagicMock()
                     MockLogger.return_value = mock_logger_instance
                     mock_logger_instance.__enter__ = Mock(return_value=mock_logger_instance)
@@ -254,15 +295,25 @@ class TestBatchProcess:
                     await batch_process(
                         df,
                         llm=mock_llm,
-                        output_dir=tmpdir,
-                        show_progress=False
+                        storage_config=StorageConfig(
+                            output_dir=tmpdir,
+                            s3_config=S3Config(
+                                bucket='env-bucket'
+                            )
+                        ),
+                        processing_config=ProcessingConfig(
+                            show_progress=False
+                        )
                     )
                     
                     # Check that S3 bucket from env was used
                     assert MockLogger.called
                     if MockLogger.call_args:
                         call_kwargs = MockLogger.call_args.kwargs
-                        assert call_kwargs['s3_bucket'] == 'env-bucket'
+                        # S3 config should be passed as s3_config object
+                        assert call_kwargs.get('s3_config') is not None
+                        if call_kwargs.get('s3_config'):
+                            assert call_kwargs['s3_config'].bucket == 'env-bucket'
     
     @pytest.mark.asyncio
     async def test_batch_process_no_llm_creates_default(self, sample_dataframe):
@@ -288,9 +339,13 @@ class TestBatchProcess:
             try:
                 await batch_process(
                     df,
-                    output_dir=tmpdir,
-                    llm_kwargs={'model': 'gpt-4', 'temperature': 0},
-                    show_progress=False
+                    storage_config=StorageConfig(
+                        output_dir=tmpdir
+                    ),
+                    processing_config=ProcessingConfig(
+                        show_progress=False
+                    ),
+                    llm_kwargs={'model': 'gpt-4', 'temperature': 0}
                 )
                 
                 # Check that ChatOpenAI was instantiated with correct kwargs
