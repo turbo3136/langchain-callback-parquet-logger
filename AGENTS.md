@@ -55,13 +55,18 @@ This package provides a high-performance callback handler for logging LangChain 
   - Tool events: on_tool_start, on_tool_end, on_tool_error
   - Agent events: on_agent_action, on_agent_finish
   - Configurable via `event_types` parameter (defaults to LLM events only for backward compatibility)
-- **Schema**: 8 columns with hierarchy support
-  - timestamp, run_id, parent_run_id, logger_custom_id, event_type, provider, logger_metadata, payload
+- **Schema**: 7 columns with hierarchy support
+  - timestamp, run_id, parent_run_id, custom_id, event_type, logger_metadata, payload
   - `parent_run_id` enables tracking of execution hierarchy (chains → LLMs → tools)
+  - LLM type is captured in the payload's `llm_type` field for llm_start events
 - Buffers entries in memory (configurable size) before flushing to Parquet files
 - Thread-safe with lock-based synchronization
 - Supports daily partitioning (date=YYYY-MM-DD) or flat structure
 - All event data stored as JSON strings in the payload column for flexibility
+- **Raw Data Capture (v2.0+)**: Complete callback data captured in `raw` section of payload
+  - All positional arguments and kwargs are serialized and stored
+  - Uses `_serialize_any()` helper to try all serialization methods (model_dump, dict, to_dict, __dict__)
+  - Ensures no information is lost while keeping `data` section clean and structured
 - **S3 Support (v0.6.0+)**: Optional upload to S3 with retry logic and configurable failure handling
 
 ### 2. Batch Processing (`batch_helpers.py`)
@@ -73,7 +78,7 @@ This package provides a high-performance callback handler for logging LangChain 
 
 ### 3. Background Response Retrieval (`background_retrieval.py`)
 - **retrieve_background_responses()**: Retrieves completed responses from OpenAI's background/async API
-- Expects DataFrame with response_id and logger_custom_id columns
+- Expects DataFrame with response_id and custom_id columns
 - Implements exponential backoff for rate limiting (429 errors)
 - Checkpoint/resume capability via Parquet files
 - Logs three event types: background_retrieval_attempt, background_retrieval_complete, background_retrieval_error
@@ -85,20 +90,24 @@ This package provides a high-performance callback handler for logging LangChain 
 - **Retry Logic**: Exponential backoff with configurable attempts
 - **Credential Chain**: Uses boto3's standard AWS credential resolution
 
-### 5. Enhanced Batch Processing (`batch_process()` in `batch_helpers.py`)
+### 5. Enhanced Batch Processing (`batch_process()` in `batch.py`)
 - **Automated Batch Processing**: High-level function that combines batch processing with automatic logging
+- **LLMConfig**: Clean configuration via LLMConfig dataclass
+  - Separates llm_kwargs (constructor args) from model_kwargs (API params)
+  - Built-in support for structured output with Pydantic models
 - **Storage Flexibility**: Supports local-only or local + S3 storage modes
 - **Job Metadata**: Automatic organization with job categories, subcategories, versions, and environments
 - **Path Templates**: Flexible path formatting with template variables
-- **LLM Auto-Configuration**: Automatic LLM creation and provider detection
-- **Structured Output**: Built-in support for Pydantic models
 - **Full Parameter Control**: Exposes all ParquetLogger and batch_run parameters
-- **Override Support**: Escape hatches for advanced customization
+- **Enhanced Metadata Tracking**: Complete batch and row-level configuration tracking
 
 ## Key Design Patterns
 
 ### Tagging System
-The `with_tags()` function in `__init__.py` creates config dictionaries with custom IDs and tags. Custom IDs are prefixed with "logger_custom_id:" and stored in the tags array, which ParquetLogger extracts during event handling.
+The `with_tags()` function in `tagging.py` creates config dictionaries with custom IDs and tags.
+- Custom IDs are prefixed with "logger_custom_id:" and stored in the tags array
+- Custom ID descriptions can be added via `custom_id_description` parameter
+- ParquetLogger extracts these during event handling and stores in the `custom_id` column
 
 ### Buffer Management
 ParquetLogger accumulates entries in memory until buffer_size is reached, then writes to Parquet. Flushing happens:
@@ -131,32 +140,57 @@ df = pd.read_parquet("./logs")
 df['data'] = df['payload'].apply(json.loads)
 ```
 
-### Enhanced Batch Processing (v1.1.0+)
+### Enhanced Batch Processing (v2.0+)
 ```python
-from langchain_callback_parquet_logger import batch_process
+from langchain_openai import ChatOpenAI
+from langchain_callback_parquet_logger import (
+    batch_process, with_tags, LLMConfig,
+    JobConfig, StorageConfig, ProcessingConfig, S3Config
+)
 import pandas as pd
 
-# Prepare DataFrame
+# Prepare DataFrame with custom IDs and descriptions
 df = pd.DataFrame({
     'prompt': ['What is AI?', 'Explain quantum computing'],
-    'config': [with_tags(custom_id='q1'), with_tags(custom_id='q2')]
+    'config': [
+        with_tags(custom_id='q1', custom_id_description='AI basics question'),
+        with_tags(custom_id='q2', custom_id_description='Physics question')
+    ]
 })
 
-# Local-only processing
+# Simple usage with LLMConfig
 await batch_process(
     df,
-    job_category="research",
-    job_subcategory="questions",
-    output_dir="./batch_logs"
+    llm_config=LLMConfig(
+        llm_class=ChatOpenAI,
+        llm_kwargs={'model': 'gpt-4', 'temperature': 0.7}
+    ),
+    job_config=JobConfig(category="research")  # Only category required
 )
 
-# With S3 upload
+# With S3 upload and model_kwargs
 await batch_process(
     df,
-    job_category="production",
-    s3_bucket="my-data-lake",
-    s3_prefix_template="ml/{job_category}/{date}/",
-    max_concurrency=1000
+    llm_config=LLMConfig(
+        llm_class=ChatOpenAI,
+        llm_kwargs={'model': 'gpt-4'},
+        model_kwargs={'top_p': 0.9, 'frequency_penalty': 0.5}  # Additional API params
+    ),
+    job_config=JobConfig(
+        category="production",
+        environment="staging"  # Optional
+    ),
+    storage_config=StorageConfig(
+        output_dir="./data",  # Local: ./data/production/default/
+        s3_config=S3Config(
+            bucket="my-data-lake",
+            prefix="data/"  # S3: s3://my-data-lake/data/production/default/
+        )
+    ),
+    processing_config=ProcessingConfig(
+        max_concurrency=1000,
+        return_results=False  # Memory-efficient for large datasets
+    )
 )
 
 # With structured output
@@ -168,9 +202,16 @@ class Answer(BaseModel):
 
 await batch_process(
     df,
-    structured_output=Answer,
-    job_category="structured_qa",
-    event_types=['llm_start', 'llm_end', 'chain_start']
+    llm_config=LLMConfig(
+        llm_class=ChatOpenAI,
+        llm_kwargs={'model': 'gpt-4'},
+        structured_output=Answer  # Pydantic model for structured responses
+    ),
+    job_config=JobConfig(category="structured_qa"),
+    processing_config=ProcessingConfig(
+        event_types=['llm_start', 'llm_end', 'chain_start'],
+        show_progress=True  # Real-time progress updates
+    )
 )
 ```
 

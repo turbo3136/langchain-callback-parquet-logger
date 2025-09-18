@@ -32,7 +32,7 @@ async def retrieve_background_responses(
     openai_client,
     logger: Optional[ParquetLogger] = None,
     response_id_col: str = "response_id",
-    logger_custom_id_col: str = "logger_custom_id",
+    custom_id_col: str = "custom_id",
     batch_size: int = 50,
     max_retries: int = 3,
     timeout: float = 30.0,
@@ -48,7 +48,7 @@ async def retrieve_background_responses(
         openai_client: Initialized OpenAI async client
         logger: Optional ParquetLogger instance for logging responses
         response_id_col: Column name containing response IDs (default: "response_id")
-        logger_custom_id_col: Column name containing custom IDs (default: "logger_custom_id")
+        custom_id_col: Column name containing custom IDs (default: "custom_id")
         batch_size: Number of concurrent requests (default: 50)
         max_retries: Maximum retries per request (default: 3)
         timeout: Timeout per request in seconds (default: 30.0)
@@ -66,7 +66,7 @@ async def retrieve_background_responses(
         >>> client = openai.AsyncClient()
         >>> df = pd.DataFrame({
         ...     'response_id': ['resp_123', 'resp_456'],
-        ...     'logger_custom_id': ['user-001', 'user-002']
+        ...     'custom_id': ['user-001', 'user-002']
         ... })
         >>> 
         >>> with ParquetLogger('./logs') as logger:
@@ -78,10 +78,10 @@ async def retrieve_background_responses(
     # Validate required columns
     if response_id_col not in df.columns:
         raise ValueError(f"Column '{response_id_col}' not found in DataFrame")
-    if logger_custom_id_col not in df.columns:
-        warnings.warn(f"Column '{logger_custom_id_col}' not found. Using empty string for custom IDs.")
+    if custom_id_col not in df.columns:
+        warnings.warn(f"Column '{custom_id_col}' not found. Using empty string for custom IDs.")
         df = df.copy()
-        df[logger_custom_id_col] = ""
+        df[custom_id_col] = ""
     
     # Initialize progress tracking
     progress_bar = None
@@ -128,7 +128,7 @@ async def retrieve_background_responses(
     async def retrieve_single(row: Dict[str, Any]) -> Dict[str, Any]:
         """Retrieve a single response with retries and logging."""
         response_id = row[response_id_col]
-        custom_id = row.get(logger_custom_id_col, "")
+        custom_id = row.get(custom_id_col, "")
         
         # Skip if already processed
         if response_id in processed_ids:
@@ -148,9 +148,9 @@ async def retrieve_background_responses(
             logger._add_entry({
                 'timestamp': datetime.now(timezone.utc),
                 'run_id': '',
-                'logger_custom_id': custom_id,
+                'parent_run_id': '',
+                'custom_id': custom_id,
                 'event_type': 'background_retrieval_attempt',
-                'provider': 'openai',
                 'logger_metadata': logger.logger_metadata_json,
                 'payload': json.dumps({
                     'response_id': response_id,
@@ -189,9 +189,9 @@ async def retrieve_background_responses(
                     logger._add_entry({
                         'timestamp': datetime.now(timezone.utc),
                         'run_id': '',
-                        'logger_custom_id': custom_id,
+                        'parent_run_id': '',
+                        'custom_id': custom_id,
                         'event_type': 'background_retrieval_complete',
-                        'provider': 'openai',
                         'logger_metadata': logger.logger_metadata_json,
                         'payload': json.dumps({
                             'response_id': response_id,
@@ -245,9 +245,9 @@ async def retrieve_background_responses(
             logger._add_entry({
                 'timestamp': datetime.now(timezone.utc),
                 'run_id': '',
-                'logger_custom_id': custom_id,
+                'parent_run_id': '',
+                'custom_id': custom_id,
                 'event_type': 'background_retrieval_error',
-                'provider': 'openai',
                 'logger_metadata': logger.logger_metadata_json,
                 'payload': json.dumps({
                     'response_id': response_id,
