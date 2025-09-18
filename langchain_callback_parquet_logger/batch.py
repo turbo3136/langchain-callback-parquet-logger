@@ -192,8 +192,7 @@ async def batch_process(
     if column_config.prompt not in df.columns:
         raise ValueError(f"DataFrame missing required column: {column_config.prompt}")
 
-    # Create LLM from config
-    llm = llm_config.create_llm()
+    # LLM will be created inside the logger context with callbacks
 
     # Format path templates with job metadata
     # Sanitize version for directory names (replace dots with underscores)
@@ -270,21 +269,8 @@ async def batch_process(
         event_types=processing_config.event_types,
         s3_config=storage_config.s3_config
     ) as logger:
-        # Add logger to LLM callbacks
-        if hasattr(llm, 'callbacks'):
-            if llm.callbacks:
-                llm.callbacks.append(logger)
-            else:
-                llm.callbacks = [logger]
-        else:
-            # Try to set callbacks attribute
-            try:
-                llm.callbacks = [logger]
-            except AttributeError:
-                raise ValueError(
-                    "Cannot add callbacks to LLM. "
-                    "Please provide an LLM that supports callbacks."
-                )
+        # Create LLM with logger as callback
+        llm = llm_config.create_llm(callbacks=[logger])
 
         # Run batch processing
         results = await batch_run(

@@ -111,18 +111,25 @@ class LLMConfig:
     model_kwargs: Optional[Dict[str, Any]] = None  # Additional model parameters
     structured_output: Optional[Type] = None  # Optional Pydantic model for structured output
 
-    def create_llm(self) -> Any:
+    def create_llm(self, callbacks: Optional[list] = None) -> Any:
         """Create the LLM instance from config.
 
         This combines llm_kwargs and model_kwargs appropriately:
         - llm_kwargs are passed directly to the LLM constructor
         - model_kwargs are passed as the 'model_kwargs' parameter
+
+        Args:
+            callbacks: Optional list of callbacks to attach to the LLM
         """
         kwargs = (self.llm_kwargs or {}).copy()
         if self.model_kwargs:
             # Most LangChain LLMs accept a model_kwargs parameter
             # for additional model-specific parameters
             kwargs['model_kwargs'] = self.model_kwargs
+
+        # Add callbacks if provided
+        if callbacks:
+            kwargs['callbacks'] = callbacks
 
         llm = self.llm_class(**kwargs)
 
