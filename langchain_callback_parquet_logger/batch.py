@@ -196,11 +196,15 @@ async def batch_process(
     llm = llm_config.create_llm()
 
     # Format path templates with job metadata
+    # Sanitize version for directory names (replace dots with underscores)
+    version_safe = (job_config.version or 'unversioned').replace('.', '_')
+
     template_vars = {
         'job_category': job_config.category,
         'job_subcategory': job_config.subcategory or 'default',
         'environment': job_config.environment or 'production',
-        'job_version': job_config.version or '1.0.0',
+        'job_version': job_config.version,        # Keep original for backward compatibility
+        'job_version_safe': version_safe,         # New sanitized version for paths
         'date': date.today().isoformat(),
     }
 

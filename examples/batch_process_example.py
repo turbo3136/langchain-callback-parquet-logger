@@ -88,10 +88,10 @@ async def example_with_s3():
         ),
         storage_config=StorageConfig(
             output_dir="./temp_logs",
-            path_template="{job_category}/{job_subcategory}/{date}",
+            path_template="{job_category}/{job_subcategory}/v{job_version_safe}/{date}",  # Version included in path
             s3_config=S3Config(
                 bucket="my-ml-data",
-                prefix="ml/"  # S3: ml/nlp/sentiment_analysis/2024-01-15/
+                prefix="ml/"  # S3: ml/nlp/sentiment_analysis/v1_0_0/2024-01-15/
             )
         ),
         processing_config=ProcessingConfig(
@@ -167,7 +167,7 @@ async def example_custom_llm():
         ),
         storage_config=StorageConfig(
             output_dir="./batch_logs",
-            path_template="{job_category}/v{job_version}/{date}"
+            path_template="{job_category}/v{job_version_safe}/{date}"  # Using sanitized version (dots -> underscores)
         ),
         processing_config=ProcessingConfig(
             buffer_size=10,  # Flush frequently for testing
@@ -201,7 +201,7 @@ async def example_huge_dataset():
             output_dir="./bulk_logs",
             s3_config=S3Config(
                 bucket="data-lake",
-                prefix="bulk/"  # S3: bulk/bulk_processing/large_dataset/
+                prefix="bulk/"  # S3: bulk/bulk_processing/large_dataset/vunversioned/ (no version specified)
             )
         ),
         processing_config=ProcessingConfig(

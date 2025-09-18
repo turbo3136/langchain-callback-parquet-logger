@@ -142,7 +142,7 @@ results = await batch_process(
     # Storage configuration
     storage_config=StorageConfig(
         output_dir="./batch_logs",
-        path_template="{job_category}/{date}/{job_subcategory}",  # Custom path structure
+        path_template="{job_category}/{date}/{job_subcategory}/v{job_version_safe}",  # Custom path structure with version
         s3_config=S3Config(
             bucket="my-llm-logs",
             prefix="langchain-logs/",
@@ -302,7 +302,9 @@ await batch_process(
 
 ### StorageConfig
 - `output_dir`: Local directory (default: "./batch_logs")
-- `path_template`: Path template for organizing files (default: "{job_category}/{job_subcategory}")
+- `path_template`: Path template for organizing files (default: "{job_category}/{job_subcategory}/v{job_version_safe}")
+  - Available variables: `job_category`, `job_subcategory`, `job_version` (original), `job_version_safe` (dots replaced with underscores), `environment`, `date`
+  - Example paths: `ml_training/image_classification/v2_1_0/` or `research/nlp/vunversioned/` (when no version specified)
 - `s3_config`: Optional S3Config for uploads
 
 ### S3Config

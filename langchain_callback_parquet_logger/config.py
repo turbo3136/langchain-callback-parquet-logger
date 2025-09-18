@@ -76,7 +76,7 @@ class ProcessingConfig:
 class StorageConfig:
     """Storage configuration for batch processing."""
     output_dir: str = "./batch_logs"
-    path_template: str = "{job_category}/{job_subcategory}"
+    path_template: str = "{job_category}/{job_subcategory}/v{job_version_safe}"
     s3_config: Optional[S3Config] = None
 
 
