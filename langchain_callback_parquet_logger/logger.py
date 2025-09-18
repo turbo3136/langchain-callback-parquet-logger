@@ -103,6 +103,24 @@ class ParquetLogger(BaseCallbackHandler):
     def _serialize_any(self, obj: Any) -> Any:
         """Try all possible serialization methods for complete data capture."""
         try:
+            # Special handling for LLMResult to preserve nested AIMessage metadata
+            if obj.__class__.__name__ == 'LLMResult':
+                # First get the standard serialization
+                result = obj.model_dump() if hasattr(obj, 'model_dump') else obj.dict()
+
+                # Fix nested message serialization to preserve all metadata
+                if 'generations' in result and hasattr(obj, 'generations'):
+                    for i, gen_list in enumerate(obj.generations):
+                        for j, gen in enumerate(gen_list):
+                            if hasattr(gen, 'message'):
+                                # Directly serialize the message to preserve all fields
+                                msg = gen.message
+                                if hasattr(msg, 'model_dump'):
+                                    result['generations'][i][j]['message'] = msg.model_dump()
+                                elif hasattr(msg, 'dict'):
+                                    result['generations'][i][j]['message'] = msg.dict()
+                return result
+
             # Try various serialization methods in order of preference
             if hasattr(obj, 'model_dump'):  # Pydantic v2
                 return obj.model_dump()
@@ -155,6 +173,22 @@ class ParquetLogger(BaseCallbackHandler):
             "message": str(error),
             "type": type(error).__name__
         }
+
+    def _extract_message_metadata(self, response: Any) -> Dict[str, Any]:
+        """Extract metadata from first AIMessage in generations if present."""
+        metadata = {}
+        if hasattr(response, 'generations') and response.generations:
+            if response.generations[0] and len(response.generations[0]) > 0:
+                gen = response.generations[0][0]
+                if hasattr(gen, 'message'):
+                    msg = gen.message
+                    # Extract usage_metadata if present
+                    if hasattr(msg, 'usage_metadata') and msg.usage_metadata:
+                        metadata['usage_metadata'] = msg.usage_metadata
+                    # Extract response_metadata if present and not already captured
+                    if hasattr(msg, 'response_metadata') and msg.response_metadata:
+                        metadata['response_metadata'] = msg.response_metadata
+        return metadata
 
     def _convert_response(self, response: Any) -> Dict[str, Any]:
         """Convert LangChain response to dict format."""
@@ -225,6 +259,9 @@ class ParquetLogger(BaseCallbackHandler):
 
         if hasattr(response, 'response_metadata'):
             data["response_metadata"] = response.response_metadata
+
+        # Extract metadata from nested AIMessage (usage_metadata, response_metadata, etc.)
+        data.update(self._extract_message_metadata(response))
 
         # Capture complete response in raw
         kwargs['response'] = self._serialize_any(response)
