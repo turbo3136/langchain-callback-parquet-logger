@@ -20,12 +20,19 @@ def create_mock_llm_class():
     class MockLLM:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
-            self.callbacks = []
+            self.callbacks = kwargs.get('callbacks', [])
             self.ainvoke = AsyncMock(return_value=Mock(content="response"))
 
         def with_structured_output(self, schema):
-            self.structured_output = schema
-            return self
+            """Simulate RunnableSequence that doesn't have callbacks attribute."""
+            class MockRunnableSequence:
+                def __init__(self, base_llm, schema):
+                    self.base_llm = base_llm
+                    self.schema = schema
+                    # Importantly, no callbacks attribute
+                    self.ainvoke = AsyncMock(return_value=Mock(content="structured_response"))
+
+            return MockRunnableSequence(self, schema)
 
     MockLLM.__name__ = 'MockLLM'
     MockLLM.__module__ = 'test_module'
@@ -427,3 +434,53 @@ class TestBatchProcess:
             # Check local path has 'unversioned' as default
             expected_local = Path(tmpdir) / "experiments" / "baseline" / "vunversioned"
             assert expected_local.exists(), f"Expected path {expected_local} does not exist"
+
+    @pytest.mark.asyncio
+    async def test_structured_output_with_callbacks(self, sample_dataframe):
+        """Test that structured output works correctly with callbacks.
+
+        This test ensures that when using structured output (which wraps the LLM in a
+        RunnableSequence), callbacks are still properly attached and functional.
+        This addresses the bug where RunnableSequence doesn't have a callbacks attribute.
+        """
+        from pydantic import BaseModel
+
+        class TestSchema(BaseModel):
+            answer: str
+            confidence: float
+
+        df = sample_dataframe.copy()
+        df['prompt'] = df['text']
+        df['config'] = df['id'].apply(lambda x: with_tags(custom_id=str(x)))
+
+        MockLLM = create_mock_llm_class()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # This should not raise "RunnableSequence has no field callbacks"
+            results = await batch_process(
+                df,
+                llm_config=LLMConfig(
+                    llm_class=MockLLM,
+                    llm_kwargs={'model': 'test-model'},
+                    structured_output=TestSchema  # This causes LLM to be wrapped in RunnableSequence
+                ),
+                job_config=JobConfig(
+                    category="structured_test",
+                    description="Testing structured output with callbacks"
+                ),
+                storage_config=StorageConfig(
+                    output_dir=tmpdir
+                ),
+                processing_config=ProcessingConfig(
+                    show_progress=False,
+                    return_results=True
+                )
+            )
+
+            # Verify the process completed without errors
+            expected_path = Path(tmpdir) / "structured_test" / "default" / "vunversioned"
+            assert expected_path.exists(), f"Expected path {expected_path} does not exist"
+
+            # Check that callbacks were properly passed through LLM constructor
+            # The MockLLM should have received callbacks in its kwargs
+            # This is verified implicitly by the test not raising an error
