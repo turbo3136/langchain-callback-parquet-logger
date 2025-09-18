@@ -12,12 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `_serialize_any()` helper for comprehensive object serialization
 - All callback arguments now captured in raw (positional + kwargs)
 - Tests for raw data capture verification
+- `job_version_safe` template variable for filesystem-safe version paths (dots replaced with underscores)
+- Comprehensive tests for version path validation in both local and S3 storage
 
 ### Changed (BREAKING)
 - **BREAKING**: Removed `provider` column from Parquet schema (8 columns → 7 columns)
 - **BREAKING**: Provider detection has been completely removed in favor of using LangChain's native `_llm_type`
+- **BREAKING**: Default `StorageConfig.path_template` now includes version: `"{job_category}/{job_subcategory}/v{job_version_safe}"`
 - The `llm_type` is now captured in the event payload data for `llm_start` events
 - Schema now contains: timestamp, run_id, parent_run_id, logger_custom_id, event_type, logger_metadata, payload
+- Version defaults to "unversioned" instead of "1.0.0" when not specified in JobConfig
 
 ### Removed
 - Removed `DEFAULT_PROVIDER` constant from config
