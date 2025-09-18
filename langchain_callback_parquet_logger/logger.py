@@ -178,16 +178,21 @@ class ParquetLogger(BaseCallbackHandler):
         """Extract metadata from first AIMessage in generations if present."""
         metadata = {}
         if hasattr(response, 'generations') and response.generations:
-            if response.generations[0] and len(response.generations[0]) > 0:
-                gen = response.generations[0][0]
-                if hasattr(gen, 'message'):
-                    msg = gen.message
-                    # Extract usage_metadata if present
-                    if hasattr(msg, 'usage_metadata') and msg.usage_metadata:
-                        metadata['usage_metadata'] = msg.usage_metadata
-                    # Extract response_metadata if present and not already captured
-                    if hasattr(msg, 'response_metadata') and msg.response_metadata:
-                        metadata['response_metadata'] = msg.response_metadata
+            try:
+                # Use try/except to handle both real lists and mock objects
+                if response.generations[0] and len(response.generations[0]) > 0:
+                    gen = response.generations[0][0]
+                    if hasattr(gen, 'message'):
+                        msg = gen.message
+                        # Extract usage_metadata if present
+                        if hasattr(msg, 'usage_metadata') and msg.usage_metadata:
+                            metadata['usage_metadata'] = msg.usage_metadata
+                        # Extract response_metadata if present and not already captured
+                        if hasattr(msg, 'response_metadata') and msg.response_metadata:
+                            metadata['response_metadata'] = msg.response_metadata
+            except (TypeError, IndexError, AttributeError):
+                # Handle mock objects or malformed data gracefully
+                pass
         return metadata
 
     def _convert_response(self, response: Any) -> Dict[str, Any]:
