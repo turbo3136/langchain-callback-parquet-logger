@@ -3,7 +3,7 @@
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 from io import BytesIO
 
 import pyarrow as pa
@@ -113,7 +113,7 @@ class S3Storage(StorageBackend):
 class CompositeStorage(StorageBackend):
     """Composite storage that writes to multiple backends."""
 
-    def __init__(self, backends: list[StorageBackend]):
+    def __init__(self, backends: List[StorageBackend]):
         """Initialize with list of storage backends."""
         self.backends = backends
 

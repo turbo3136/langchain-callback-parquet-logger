@@ -5,6 +5,7 @@ This shows how to use batch_process with v2.0 API for both local-only and S3-ena
 """
 
 import asyncio
+from typing import List
 import pandas as pd
 from pydantic import BaseModel
 from langchain_callback_parquet_logger import (
@@ -111,7 +112,7 @@ async def example_structured_output():
     class ProductReview(BaseModel):
         sentiment: str  # positive, negative, neutral
         confidence: float
-        key_points: list[str]
+        key_points: List[str]
 
     df = pd.DataFrame({
         'prompt': [
