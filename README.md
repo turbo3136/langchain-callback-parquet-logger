@@ -293,7 +293,7 @@ await batch_process(
 - `structured_output`: Optional Pydantic model for structured responses
 
 ### JobConfig
-- `category`: Job category (default: "batch_processing")
+- `category`: Job category (required, default: "batch_processing")
 - `subcategory`: Job subcategory (optional, default: None)
 - `version`: Version string (optional, default: None)
 - `environment`: Environment name (optional, default: None)
@@ -359,7 +359,7 @@ All events use a consistent JSON structure in the payload column:
 ```json
 {
     "event_type": "llm_end",
-    "timestamp": "2024-01-15T10:30:00Z",
+    "timestamp": "2025-09-18T10:30:00Z",
     "execution": {
         "run_id": "uuid-here",
         "parent_run_id": "",
