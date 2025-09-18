@@ -253,9 +253,31 @@ logger = ParquetLogger(
 ```
 
 ### batch_process changes:
-- Now uses dataclass configs instead of 34 parameters
-- Much simpler and cleaner API
-- See batch processing example above
+- Now uses LLMConfig dataclass for LLM configuration
+- Dataclass configs replace multiple parameters
+- Column renamed from `logger_custom_id` to `custom_id`
+- See batch processing examples above
+
+#### Old batch_process (v1.x)
+```python
+await batch_process(
+    df,
+    llm=llm_instance,  # or llm_class with llm_kwargs
+    structured_output=MyModel
+)
+```
+
+#### New batch_process (v2.0)
+```python
+await batch_process(
+    df,
+    llm_config=LLMConfig(
+        llm_class=ChatOpenAI,
+        llm_kwargs={'model': 'gpt-4'},
+        model_kwargs={'top_p': 0.9},  # Additional API params
+        structured_output=MyModel
+    )
+)
 
 ## Configuration Classes
 
@@ -263,6 +285,12 @@ logger = ParquetLogger(
 - `log_dir`: Where to save logs (default: "./llm_logs")
 - `buffer_size`: Entries before auto-flush (default: 100)
 - `s3_config`: Optional S3Config for uploads
+
+### LLMConfig
+- `llm_class`: The LangChain LLM class to instantiate (e.g., ChatOpenAI)
+- `llm_kwargs`: Arguments for the LLM constructor (model, temperature, etc.)
+- `model_kwargs`: Additional API parameters (top_p, frequency_penalty, etc.)
+- `structured_output`: Optional Pydantic model for structured responses
 
 ### JobConfig
 - `category`: Job category (default: "batch_processing")
@@ -317,7 +345,7 @@ with ParquetLogger('./logs', buffer_size=1) as logger:
 | `timestamp` | timestamp | Event time (UTC) |
 | `run_id` | string | Unique run ID |
 | `parent_run_id` | string | Parent run ID for nested calls |
-| `logger_custom_id` | string | Your custom tracking ID |
+| `custom_id` | string | Your custom tracking ID |
 | `event_type` | string | Event type (llm_start, llm_end, etc.) |
 | `logger_metadata` | string | JSON metadata |
 | `payload` | string | Full event data as JSON |
