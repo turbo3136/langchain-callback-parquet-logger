@@ -48,11 +48,11 @@ class S3Config:
 class JobConfig:
     """Job metadata configuration for batch processing."""
     category: str = "batch_processing"
-    subcategory: str = "default"
-    description: str = ""
-    version: str = "1.0.0"
-    environment: str = "production"
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    subcategory: Optional[str] = None
+    description: Optional[str] = None
+    version: Optional[str] = None
+    environment: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 
 @dataclass

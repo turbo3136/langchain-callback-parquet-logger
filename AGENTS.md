@@ -136,9 +136,12 @@ df = pd.read_parquet("./logs")
 df['data'] = df['payload'].apply(json.loads)
 ```
 
-### Enhanced Batch Processing (v1.1.0+)
+### Enhanced Batch Processing (v2.0+)
 ```python
-from langchain_callback_parquet_logger import batch_process
+from langchain_callback_parquet_logger import (
+    batch_process, with_tags,
+    JobConfig, StorageConfig, ProcessingConfig, S3Config
+)
 import pandas as pd
 
 # Prepare DataFrame
@@ -147,21 +150,30 @@ df = pd.DataFrame({
     'config': [with_tags(custom_id='q1'), with_tags(custom_id='q2')]
 })
 
-# Local-only processing
+# Simple usage - minimal config
 await batch_process(
     df,
-    job_category="research",
-    job_subcategory="questions",
-    output_dir="./batch_logs"
+    job_config=JobConfig(category="research")  # Only category required
 )
 
-# With S3 upload
+# With S3 upload - storage paths mirror each other
 await batch_process(
     df,
-    job_category="production",
-    s3_bucket="my-data-lake",
-    s3_prefix_template="ml/{job_category}/{date}/",
-    max_concurrency=1000
+    job_config=JobConfig(
+        category="production",
+        environment="staging"  # Optional
+    ),
+    storage_config=StorageConfig(
+        output_dir="./data",  # Local: ./data/production/default/
+        s3_config=S3Config(
+            bucket="my-data-lake",
+            prefix="data/"  # S3: s3://my-data-lake/data/production/default/
+        )
+    ),
+    processing_config=ProcessingConfig(
+        max_concurrency=1000,
+        return_results=False  # Memory-efficient for large datasets
+    )
 )
 
 # With structured output
@@ -174,8 +186,11 @@ class Answer(BaseModel):
 await batch_process(
     df,
     structured_output=Answer,
-    job_category="structured_qa",
-    event_types=['llm_start', 'llm_end', 'chain_start']
+    job_config=JobConfig(category="structured_qa"),
+    processing_config=ProcessingConfig(
+        event_types=['llm_start', 'llm_end', 'chain_start'],
+        show_progress=True  # Real-time progress updates
+    )
 )
 ```
 

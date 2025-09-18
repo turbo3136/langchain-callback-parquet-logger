@@ -212,9 +212,9 @@ async def batch_process(
     # Format path templates with job metadata
     template_vars = {
         'job_category': job_config.category,
-        'job_subcategory': job_config.subcategory,
-        'environment': job_config.environment,
-        'job_version': job_config.version,
+        'job_subcategory': job_config.subcategory or 'default',
+        'environment': job_config.environment or 'production',
+        'job_version': job_config.version or '1.0.0',
         'date': date.today().isoformat(),
     }
 
@@ -228,21 +228,24 @@ async def batch_process(
 
     # Format S3 prefix if using S3
     if storage_config.s3_config:
-        # Format S3 prefix with template vars
-        s3_prefix = storage_config.path_template.format(**template_vars)
-        if not s3_prefix.endswith('/'):
-            s3_prefix += '/'
+        # Combine S3 prefix with formatted path (mirrors local structure)
+        base_prefix = storage_config.s3_config.prefix.rstrip('/')
+        formatted_path = storage_config.path_template.format(**template_vars).lstrip('/')
+        s3_prefix = f"{base_prefix}/{formatted_path}/" if base_prefix else f"{formatted_path}/"
         storage_config.s3_config.prefix = s3_prefix
 
     # Build logger configuration
-    logger_metadata = {
-        'environment': job_config.environment,
-        'job_category': job_config.category,
-        'job_subcategory': job_config.subcategory,
-        'job_description': job_config.description,
-        'job_version': job_config.version,
-        **job_config.metadata
-    }
+    logger_metadata = {'job_category': job_config.category}
+    if job_config.environment is not None:
+        logger_metadata['environment'] = job_config.environment
+    if job_config.subcategory is not None:
+        logger_metadata['job_subcategory'] = job_config.subcategory
+    if job_config.description is not None:
+        logger_metadata['job_description'] = job_config.description
+    if job_config.version is not None:
+        logger_metadata['job_version'] = job_config.version
+    if job_config.metadata:
+        logger_metadata.update(job_config.metadata)
 
     # Print status messages
     if processing_config.show_progress:

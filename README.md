@@ -110,14 +110,14 @@ results = await batch_process(
     llm_model='gpt-4',  # or pass existing LLM instance
     structured_output=None,  # or Pydantic model for structured responses
 
-    # Job metadata configuration
+    # Job metadata configuration (all fields except category are optional)
     job_config=JobConfig(
         category="research",
-        subcategory="science",
-        description="Analyzing scientific questions",
-        version="2.0.0",
-        environment="production",
-        metadata={"team": "data-science", "priority": "high"}
+        subcategory="science",  # Optional, defaults to None
+        description="Analyzing scientific questions",  # Optional
+        version="2.0.0",  # Optional
+        environment="production",  # Optional
+        metadata={"team": "data-science", "priority": "high"}  # Optional
     ),
 
     # Storage configuration
@@ -136,7 +136,7 @@ results = await batch_process(
     processing_config=ProcessingConfig(
         max_concurrency=100,  # Parallel requests
         buffer_size=1000,  # Logger buffer size
-        show_progress=True,  # Progress bar
+        show_progress=True,  # Progress bar with real-time updates
         return_exceptions=True,  # Don't fail on single errors
         return_results=True,  # Set False for huge datasets to save memory
         event_types=['llm_start', 'llm_end', 'llm_error'],  # Events to log
@@ -247,12 +247,15 @@ logger = ParquetLogger(
 
 ### JobConfig
 - `category`: Job category (default: "batch_processing")
-- `subcategory`: Job subcategory (default: "default")
-- `version`: Version string (default: "1.0.0")
-- `environment`: Environment name (default: "production")
+- `subcategory`: Job subcategory (optional, default: None)
+- `version`: Version string (optional, default: None)
+- `environment`: Environment name (optional, default: None)
+- `description`: Job description (optional, default: None)
+- `metadata`: Additional metadata dict (optional, default: None)
 
 ### StorageConfig
 - `output_dir`: Local directory (default: "./batch_logs")
+- `path_template`: Path template for organizing files (default: "{job_category}/{job_subcategory}")
 - `s3_config`: Optional S3Config for uploads
 
 ### S3Config
