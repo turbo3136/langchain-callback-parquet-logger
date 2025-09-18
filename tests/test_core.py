@@ -46,7 +46,7 @@ class TestParquetLogger:
         logger._add_entry({
             'timestamp': pd.Timestamp.now('UTC'),
             'run_id': 'run-1',
-            'logger_custom_id': '',
+            'custom_id': '',
             'event_type': 'test1',
             'parent_run_id': '',
             'logger_metadata': '{}',
@@ -61,7 +61,7 @@ class TestParquetLogger:
         logger._add_entry({
             'timestamp': pd.Timestamp.now('UTC'),
             'run_id': 'run-2',
-            'logger_custom_id': '',
+            'custom_id': '',
             'event_type': 'test2',
             'parent_run_id': '',
             'logger_metadata': '{}',
@@ -80,7 +80,7 @@ class TestParquetLogger:
         logger._add_entry({
             'timestamp': pd.Timestamp.now('UTC'),
             'run_id': 'run-1',
-            'logger_custom_id': '',
+            'custom_id': '',
             'event_type': 'test',
             'parent_run_id': '',
             'logger_metadata': '{}',
@@ -100,7 +100,7 @@ class TestParquetLogger:
             logger._add_entry({
                 'timestamp': pd.Timestamp.now('UTC'),
                 'run_id': 'run-1',
-                'logger_custom_id': '',
+                'custom_id': '',
                 'event_type': 'test',
                 'parent_run_id': '',
                 'logger_metadata': '{}',
@@ -121,7 +121,7 @@ class TestParquetLogger:
         logger._add_entry({
             'timestamp': pd.Timestamp.now('UTC'),
             'run_id': 'run-1',
-            'logger_custom_id': '',
+            'custom_id': '',
             'event_type': 'test',
             'parent_run_id': '',
             'logger_metadata': '{}',
@@ -143,7 +143,7 @@ class TestParquetLogger:
         logger._add_entry({
             'timestamp': pd.Timestamp.now('UTC'),
             'run_id': 'run-1',
-            'logger_custom_id': '',
+            'custom_id': '',
             'event_type': 'test',
             'parent_run_id': '',
             'logger_metadata': '{}',
@@ -170,7 +170,7 @@ class TestParquetLogger:
         logger._add_entry({
             'timestamp': pd.Timestamp.now('UTC'),
             'run_id': 'run-1',
-            'logger_custom_id': '',
+            'custom_id': '',
             'event_type': 'test',
             'parent_run_id': '',
             'logger_metadata': json.dumps(metadata),
@@ -237,7 +237,7 @@ class TestParquetLogger:
         files = list(Path(temp_log_dir).glob("**/*.parquet"))
         df = pd.read_parquet(files[0])
         
-        assert df.iloc[0]['logger_custom_id'] == 'my-custom-id'
+        assert df.iloc[0]['custom_id'] == 'my-custom-id'
 
 
 class TestWithTags:

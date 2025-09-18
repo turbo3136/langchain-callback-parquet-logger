@@ -1,7 +1,7 @@
 """Configuration dataclasses for LangChain Parquet Logger."""
 
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, List, Literal
+from typing import Dict, Any, Optional, List, Literal, Type
 from enum import Enum
 
 
@@ -86,6 +86,66 @@ class ColumnConfig:
     prompt: str = "prompt"
     config: str = "config"
     tools: Optional[str] = "tools"
+
+
+@dataclass
+class LLMConfig:
+    """LLM configuration for batch processing.
+
+    Understanding the kwargs distinction:
+    - llm_kwargs: Arguments passed directly to the LLM class constructor
+      Examples: model='gpt-4', temperature=0.7, api_key='...', max_tokens=1000
+    - model_kwargs: Additional parameters passed to the underlying model API
+      These get passed through to the model_kwargs parameter that most LangChain
+      LLMs support. Examples: top_p=0.9, frequency_penalty=0.5, presence_penalty=0.5
+
+    Example usage:
+        config = LLMConfig(
+            llm_class=ChatOpenAI,
+            llm_kwargs={'model': 'gpt-4', 'temperature': 0.7},  # OpenAI client args
+            model_kwargs={'top_p': 0.9}  # Additional model parameters
+        )
+    """
+    llm_class: Type  # The LangChain LLM class to instantiate (e.g., ChatOpenAI)
+    llm_kwargs: Optional[Dict[str, Any]] = None  # Constructor arguments for the LLM class
+    model_kwargs: Optional[Dict[str, Any]] = None  # Additional model parameters
+    structured_output: Optional[Type] = None  # Optional Pydantic model for structured output
+
+    def create_llm(self) -> Any:
+        """Create the LLM instance from config.
+
+        This combines llm_kwargs and model_kwargs appropriately:
+        - llm_kwargs are passed directly to the LLM constructor
+        - model_kwargs are passed as the 'model_kwargs' parameter
+        """
+        kwargs = (self.llm_kwargs or {}).copy()
+        if self.model_kwargs:
+            # Most LangChain LLMs accept a model_kwargs parameter
+            # for additional model-specific parameters
+            kwargs['model_kwargs'] = self.model_kwargs
+
+        llm = self.llm_class(**kwargs)
+
+        if self.structured_output:
+            llm = llm.with_structured_output(self.structured_output)
+
+        return llm
+
+    def to_metadata_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for metadata tracking.
+
+        This ensures all configuration is logged for observability.
+        """
+        return {
+            'class': self.llm_class.__name__,
+            'module': self.llm_class.__module__,
+            'llm_kwargs': self.llm_kwargs or {},
+            'model_kwargs': self.model_kwargs or {},
+            'structured_output': (
+                self.structured_output.__name__
+                if self.structured_output else None
+            )
+        }
 
 
 # Constants

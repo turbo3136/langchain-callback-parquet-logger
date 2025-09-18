@@ -8,6 +8,7 @@ from .config import (
     ProcessingConfig,
     StorageConfig,
     ColumnConfig,
+    LLMConfig,
     EventType,
 )
 from .batch import batch_run, batch_process
@@ -37,6 +38,7 @@ __all__ = [
     'ProcessingConfig',
     'StorageConfig',
     'ColumnConfig',
+    'LLMConfig',
     'EventType',
 
     # Version

@@ -23,7 +23,7 @@ SCHEMA = pa.schema([
     ("timestamp", pa.timestamp("us", tz="UTC")),
     ("run_id", pa.string()),
     ("parent_run_id", pa.string()),
-    ("logger_custom_id", pa.string()),
+    ("custom_id", pa.string()),
     ("event_type", pa.string()),
     ("logger_metadata", pa.string()),
     ("payload", pa.string()),
@@ -176,7 +176,7 @@ class ParquetLogger(BaseCallbackHandler):
             'timestamp': datetime.now(timezone.utc),
             'run_id': payload["execution"]["run_id"],
             'parent_run_id': payload["execution"]["parent_run_id"],
-            'logger_custom_id': payload["execution"]["custom_id"],
+            'custom_id': payload["execution"]["custom_id"],
             'event_type': payload["event_type"],
             'logger_metadata': self.logger_metadata_json,
             'payload': self._safe_json_dumps(payload)
@@ -366,8 +366,8 @@ class ParquetLogger(BaseCallbackHandler):
             run_id = pa.array([e["run_id"] for e in buffer], type=pa.string())
             parent_run_id = pa.array([e.get("parent_run_id", "") for e in buffer],
                                     type=pa.string())
-            logger_custom_id = pa.array([e["logger_custom_id"] for e in buffer],
-                                       type=pa.string())
+            custom_id = pa.array([e["custom_id"] for e in buffer],
+                               type=pa.string())
             event_type = pa.array([e["event_type"] for e in buffer], type=pa.string())
             logger_metadata = pa.array([e["logger_metadata"] for e in buffer],
                                       type=pa.string())
@@ -375,7 +375,7 @@ class ParquetLogger(BaseCallbackHandler):
 
             # Create table with explicit schema
             table = pa.Table.from_arrays(
-                [ts, run_id, parent_run_id, logger_custom_id, event_type,
+                [ts, run_id, parent_run_id, custom_id, event_type,
                  logger_metadata, payload],
                 schema=SCHEMA
             )

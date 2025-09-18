@@ -23,7 +23,7 @@ def sample_df():
     """Create a sample DataFrame with response IDs."""
     return pd.DataFrame({
         'response_id': ['resp_001', 'resp_002', 'resp_003'],
-        'logger_custom_id': ['user-001', 'user-002', 'user-003'],
+        'custom_id': ['user-001', 'user-002', 'user-003'],
         'other_data': ['data1', 'data2', 'data3']
     })
 
@@ -86,7 +86,7 @@ async def test_rate_limiting():
     
     df = pd.DataFrame({
         'response_id': ['resp_001'],
-        'logger_custom_id': ['user-001']
+        'custom_id': ['user-001']
     })
     
     client = AsyncMock()
@@ -211,7 +211,7 @@ async def test_partial_failures(mock_openai_client):
     """Test handling of partial failures."""
     df = pd.DataFrame({
         'response_id': ['resp_001', 'resp_002', 'resp_003'],
-        'logger_custom_id': ['user-001', 'user-002', 'user-003']
+        'custom_id': ['user-001', 'user-002', 'user-003']
     })
     
     # Mock mixed success/failure responses
@@ -241,7 +241,7 @@ async def test_partial_failures(mock_openai_client):
 @pytest.mark.asyncio
 async def test_missing_columns():
     """Test handling of missing columns."""
-    # DataFrame missing logger_custom_id column
+    # DataFrame missing custom_id column
     df = pd.DataFrame({
         'response_id': ['resp_001']
     })
@@ -252,7 +252,7 @@ async def test_missing_columns():
     )
     
     # Should work with warning
-    with pytest.warns(UserWarning, match="logger_custom_id"):
+    with pytest.warns(UserWarning, match="custom_id"):
         results = await retrieve_background_responses(
             df,
             client,
@@ -278,7 +278,7 @@ async def test_timeout_handling():
     """Test timeout handling."""
     df = pd.DataFrame({
         'response_id': ['resp_001'],
-        'logger_custom_id': ['user-001']
+        'custom_id': ['user-001']
     })
     
     client = AsyncMock()
@@ -308,7 +308,7 @@ async def test_batch_processing():
     # Create larger DataFrame
     df = pd.DataFrame({
         'response_id': [f'resp_{i:03d}' for i in range(10)],
-        'logger_custom_id': [f'user_{i:03d}' for i in range(10)]
+        'custom_id': [f'user_{i:03d}' for i in range(10)]
     })
     
     client = AsyncMock()
@@ -336,7 +336,7 @@ async def test_logging_event_types():
     """Test that correct event types are logged."""
     df = pd.DataFrame({
         'response_id': ['resp_001'],
-        'logger_custom_id': ['user-001']
+        'custom_id': ['user-001']
     })
     
     with tempfile.TemporaryDirectory() as tmpdir:

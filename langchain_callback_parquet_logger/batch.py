@@ -2,7 +2,8 @@
 
 import os
 from pathlib import Path
-from datetime import date
+from datetime import date, datetime, timezone
+from dataclasses import asdict
 from typing import Any, Optional, TYPE_CHECKING, Type, List
 
 import pandas as pd
@@ -11,7 +12,7 @@ from langchain_core.runnables import RunnableLambda
 from .logger import ParquetLogger
 from .config import (
     JobConfig, StorageConfig, ProcessingConfig, ColumnConfig,
-    S3Config, EventType
+    S3Config, EventType, LLMConfig
 )
 from .tagging import with_tags
 
@@ -133,38 +134,36 @@ async def batch_run(
 
 async def batch_process(
     df: pd.DataFrame,
-    llm: Any = None,
+    llm_config: LLMConfig,
     job_config: Optional[JobConfig] = None,
     storage_config: Optional[StorageConfig] = None,
     processing_config: Optional[ProcessingConfig] = None,
     column_config: Optional[ColumnConfig] = None,
-    llm_class: Optional[Type] = None,
-    structured_output: Optional[Type] = None,
-    llm_kwargs: Optional[dict] = None,
 ) -> Optional[List]:
     """
     Batch process DataFrame through LLM with automatic logging to Parquet.
 
     Args:
         df: DataFrame with prepared data
-        llm: Pre-configured LLM instance (if None, will create one)
+        llm_config: LLM configuration including class, kwargs, and structured output
         job_config: Job metadata configuration
         storage_config: Storage configuration for output files
         processing_config: Processing configuration for batch operations
         column_config: DataFrame column name configuration
-        llm_class: LLM class to instantiate if llm is None
-        structured_output: Optional Pydantic model for structured output
-        llm_kwargs: Keyword arguments for LLM initialization
 
     Returns:
         List of results if processing_config.return_results=True, None otherwise
 
     Examples:
-        >>> # Simple usage with configs
+        >>> # Simple usage with LLMConfig
+        >>> from langchain_openai import ChatOpenAI
         >>> await batch_process(
         ...     df,
-        ...     job_config=JobConfig(category='analysis', version='2.0'),
-        ...     storage_config=StorageConfig(s3_config=S3Config(bucket='my-bucket'))
+        ...     llm_config=LLMConfig(
+        ...         llm_class=ChatOpenAI,
+        ...         llm_kwargs={'model': 'gpt-4', 'temperature': 0.7}
+        ...     ),
+        ...     job_config=JobConfig(category='analysis', version='2.0')
         ... )
 
         >>> # With structured output
@@ -175,7 +174,11 @@ async def batch_process(
         >>>
         >>> await batch_process(
         ...     df,
-        ...     structured_output=EmailInfo,
+        ...     llm_config=LLMConfig(
+        ...         llm_class=ChatOpenAI,
+        ...         llm_kwargs={'model': 'gpt-4'},
+        ...         structured_output=EmailInfo
+        ...     ),
         ...     job_config=JobConfig(category='email_validation')
         ... )
     """
@@ -189,25 +192,8 @@ async def batch_process(
     if column_config.prompt not in df.columns:
         raise ValueError(f"DataFrame missing required column: {column_config.prompt}")
 
-    # Handle LLM creation
-    if llm is None:
-        if llm_class is None:
-            # Try to use ChatOpenAI as default
-            try:
-                from langchain_openai import ChatOpenAI
-                llm_class = ChatOpenAI
-            except ImportError:
-                raise ImportError(
-                    "No LLM provided and ChatOpenAI not available. "
-                    "Either provide 'llm' parameter or install langchain-openai"
-                )
-
-        # Initialize LLM
-        llm = llm_class(**(llm_kwargs or {}))
-
-    # Apply structured output if provided
-    if structured_output:
-        llm = llm.with_structured_output(structured_output)
+    # Create LLM from config
+    llm = llm_config.create_llm()
 
     # Format path templates with job metadata
     template_vars = {
@@ -234,18 +220,35 @@ async def batch_process(
         s3_prefix = f"{base_prefix}/{formatted_path}/" if base_prefix else f"{formatted_path}/"
         storage_config.s3_config.prefix = s3_prefix
 
-    # Build logger configuration
-    logger_metadata = {'job_category': job_config.category}
-    if job_config.environment is not None:
-        logger_metadata['environment'] = job_config.environment
-    if job_config.subcategory is not None:
-        logger_metadata['job_subcategory'] = job_config.subcategory
-    if job_config.description is not None:
-        logger_metadata['job_description'] = job_config.description
-    if job_config.version is not None:
-        logger_metadata['job_version'] = job_config.version
-    if job_config.metadata:
-        logger_metadata.update(job_config.metadata)
+    # Build comprehensive logger metadata
+    logger_metadata = {
+        # Legacy flat fields (for backward compatibility in queries)
+        'job_category': job_config.category,
+        'job_subcategory': job_config.subcategory,
+        'environment': job_config.environment,
+        'job_description': job_config.description,
+        'job_version': job_config.version,
+
+        # Complete batch-level configs (NEW structure)
+        'batch_config': {
+            'job': asdict(job_config) if job_config else None,
+            'storage': {
+                'output_dir': storage_config.output_dir,
+                'path_template': storage_config.path_template,
+                's3': asdict(storage_config.s3_config) if storage_config.s3_config else None
+            },
+            'processing': asdict(processing_config) if processing_config else None,
+            'column': asdict(column_config) if column_config else None,
+            'llm': llm_config.to_metadata_dict(),
+        },
+
+        # Batch execution metadata
+        'batch_started_at': datetime.now(timezone.utc).isoformat(),
+        'batch_size': len(df),
+
+        # Custom metadata from job_config (if any)
+        **(job_config.metadata or {})
+    }
 
     # Print status messages
     if processing_config.show_progress:

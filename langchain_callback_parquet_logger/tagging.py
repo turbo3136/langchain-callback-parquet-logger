@@ -5,6 +5,7 @@ from .config import CUSTOM_ID_PREFIX
 
 
 def with_tags(*additional_tags: str, custom_id: Optional[str] = None,
+              custom_id_description: Optional[str] = None,
               tags: Optional[List[str]] = None, config: Optional[Dict[str, Any]] = None,
               replace_tags: bool = False) -> Dict[str, Any]:
     """
@@ -16,6 +17,8 @@ def with_tags(*additional_tags: str, custom_id: Optional[str] = None,
     Args:
         *additional_tags: Tags as positional arguments
         custom_id: Optional ID for request tracking (will be prefixed with 'logger_custom_id:')
+        custom_id_description: Human-readable description of what the custom_id represents
+                               (e.g., "Customer support ticket ID", "Research question ID")
         tags: Tags as a list (alternative to positional)
         config: Existing config to extend
         replace_tags: If True, replace existing tags instead of extending (default: False)
@@ -26,26 +29,31 @@ def with_tags(*additional_tags: str, custom_id: Optional[str] = None,
     Examples:
         >>> from langchain_callback_parquet_logger import with_tags
         >>>
-        >>> # Simple custom ID
-        >>> config = with_tags(custom_id="session-123")
+        >>> # Simple custom ID with description
+        >>> config = with_tags(
+        ...     custom_id="session-123",
+        ...     custom_id_description="User session identifier"
+        ... )
         >>>
-        >>> # Custom ID with additional tags (positional)
-        >>> config = with_tags("production", "v2", custom_id="session-123")
+        >>> # Custom ID with description and additional tags
+        >>> config = with_tags(
+        ...     "production", "v2",
+        ...     custom_id="ticket-456",
+        ...     custom_id_description="Customer support ticket ID"
+        ... )
         >>>
         >>> # Just tags, no custom ID
         >>> config = with_tags("production", "experimental")
         >>>
-        >>> # Custom ID with tags as list
-        >>> config = with_tags(custom_id="session-123", tags=["production", "v2"])
-        >>>
         >>> # Extend existing config
         >>> existing = {"tags": ["test"], "metadata": {"user": "john"}}
-        >>> config = with_tags("urgent", custom_id="req-456", config=existing)
-        >>> # Result: tags = ["test", "urgent", "logger_custom_id:req-456"]
-        >>>
-        >>> # Replace existing tags
-        >>> config = with_tags("new", custom_id="req-789", config=existing, replace_tags=True)
-        >>> # Result: tags = ["new", "logger_custom_id:req-789"]
+        >>> config = with_tags(
+        ...     "urgent",
+        ...     custom_id="req-789",
+        ...     custom_id_description="API request ID",
+        ...     config=existing
+        ... )
+        >>> # Result: tags includes ["test", "urgent", "logger_custom_id:req-789", "custom_id_description:API request ID"]
     """
     config = config or {}
 
@@ -66,6 +74,10 @@ def with_tags(*additional_tags: str, custom_id: Optional[str] = None,
     # Add custom ID if provided
     if custom_id:
         tag_list.append(f'{CUSTOM_ID_PREFIX}{custom_id}')
+
+        # Add the description as a separate tag if provided
+        if custom_id_description:
+            tag_list.append(f'custom_id_description:{custom_id_description}')
 
     return config
 

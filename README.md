@@ -45,7 +45,7 @@ That's it! Your logs are in Parquet format, ready for analysis.
 
 ### 1. Custom Tracking IDs
 
-Track specific requests with custom IDs:
+Track specific requests with custom IDs and descriptions:
 
 ```python
 from langchain_callback_parquet_logger import ParquetLogger, with_tags
@@ -53,10 +53,13 @@ from langchain_callback_parquet_logger import ParquetLogger, with_tags
 logger = ParquetLogger("./logs")
 llm = ChatOpenAI(callbacks=[logger])
 
-# Add custom ID to track this specific request
+# Add custom ID with description to track this specific request
 response = llm.invoke(
     "What is quantum computing?",
-    config=with_tags(custom_id="user-123-session-456")
+    config=with_tags(
+        custom_id="user-123-session-456",
+        custom_id_description="User session from mobile app"
+    )
 )
 ```
 
@@ -64,25 +67,37 @@ response = llm.invoke(
 
 ```python
 import pandas as pd
-from langchain_callback_parquet_logger import batch_process, with_tags
+from langchain_openai import ChatOpenAI
+from langchain_callback_parquet_logger import batch_process, with_tags, LLMConfig
 
 # Prepare your data
 df = pd.DataFrame({
     'prompt': ['What is AI?', 'Explain DNA'],
-    'config': [with_tags(custom_id='q1'), with_tags(custom_id='q2')]
+    'config': [
+        with_tags(custom_id='q1', custom_id_description='Science FAQ'),
+        with_tags(custom_id='q2', custom_id_description='Science FAQ')
+    ]
 })
 
 # Process with automatic logging
-results = await batch_process(df)
+results = await batch_process(
+    df,
+    llm_config=LLMConfig(
+        llm_class=ChatOpenAI,
+        llm_kwargs={'model': 'gpt-4', 'temperature': 0.7}
+    )
+)
 ```
 
 ### 3. Batch Processing (Full Configuration)
 
 ```python
 import pandas as pd
+from langchain_openai import ChatOpenAI
 from langchain_callback_parquet_logger import (
     batch_process,
     with_tags,
+    LLMConfig,
     JobConfig,
     StorageConfig,
     ProcessingConfig,
@@ -107,8 +122,12 @@ df['run_config'] = df['user_id'].apply(lambda x: with_tags(
 results = await batch_process(
     df,
     # LLM configuration
-    llm_model='gpt-4',  # or pass existing LLM instance
-    structured_output=None,  # or Pydantic model for structured responses
+    llm_config=LLMConfig(
+        llm_class=ChatOpenAI,
+        llm_kwargs={'model': 'gpt-4', 'temperature': 0.7},
+        model_kwargs={'top_p': 0.9},  # Additional model parameters
+        structured_output=None  # or Pydantic model for structured responses
+    ),
 
     # Job metadata configuration (all fields except category are optional)
     job_config=JobConfig(
