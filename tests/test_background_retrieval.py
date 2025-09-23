@@ -110,7 +110,7 @@ async def test_rate_limiting():
             client.responses.retrieve = AsyncMock(
                 side_effect=[
                     rate_limit_error,
-                    MagicMock(model_dump=lambda: {'id': 'resp_001', 'status': 'completed'})
+                    MagicMock(model_dump=lambda **kwargs: {'id': 'resp_001', 'status': 'completed'})
                 ]
             )
             
@@ -134,7 +134,7 @@ async def test_rate_limiting():
         client.responses.retrieve = AsyncMock(
             side_effect=[
                 rate_limit_error,
-                MagicMock(model_dump=lambda: {'id': 'resp_001', 'status': 'completed'})
+                MagicMock(model_dump=lambda **kwargs: {'id': 'resp_001', 'status': 'completed'})
             ]
         )
         
@@ -161,7 +161,7 @@ async def test_checkpoint_resume(sample_df):
         ])
         
         client = AsyncMock()
-        mock_response = MagicMock(model_dump=lambda: {'id': 'resp', 'status': 'completed'})
+        mock_response = MagicMock(model_dump=lambda **kwargs: {'id': 'resp', 'status': 'completed'})
         client.responses.retrieve = AsyncMock(return_value=mock_response)
         
         # Run retrieval with checkpoint
@@ -217,9 +217,9 @@ async def test_partial_failures(mock_openai_client):
     # Mock mixed success/failure responses
     mock_openai_client.responses.retrieve = AsyncMock(
         side_effect=[
-            MagicMock(model_dump=lambda: {'id': 'resp_001', 'status': 'completed'}),
+            MagicMock(model_dump=lambda **kwargs: {'id': 'resp_001', 'status': 'completed'}),
             Exception("404 Not found"),
-            MagicMock(model_dump=lambda: {'id': 'resp_003', 'status': 'completed'})
+            MagicMock(model_dump=lambda **kwargs: {'id': 'resp_003', 'status': 'completed'})
         ]
     )
     
@@ -248,7 +248,7 @@ async def test_missing_columns():
     
     client = AsyncMock()
     client.responses.retrieve = AsyncMock(
-        return_value=MagicMock(model_dump=lambda: {'id': 'resp_001'})
+        return_value=MagicMock(model_dump=lambda **kwargs: {'id': 'resp_001'})
     )
     
     # Should work with warning
@@ -316,7 +316,7 @@ async def test_batch_processing():
     
     async def track_calls(response_id):
         call_times.append(asyncio.get_event_loop().time())
-        return MagicMock(model_dump=lambda: {'id': response_id})
+        return MagicMock(model_dump=lambda **kwargs: {'id': response_id})
     
     client.responses.retrieve = AsyncMock(side_effect=track_calls)
     
@@ -344,7 +344,7 @@ async def test_logging_event_types():
         
         client = AsyncMock()
         client.responses.retrieve = AsyncMock(
-            return_value=MagicMock(model_dump=lambda: {'id': 'resp_001'})
+            return_value=MagicMock(model_dump=lambda **kwargs: {'id': 'resp_001'})
         )
         
         await retrieve_background_responses(

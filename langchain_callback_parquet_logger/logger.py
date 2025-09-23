@@ -106,7 +106,7 @@ class ParquetLogger(BaseCallbackHandler):
             # Special handling for LLMResult to preserve nested AIMessage metadata
             if obj.__class__.__name__ == 'LLMResult':
                 # First get the standard serialization
-                result = obj.model_dump() if hasattr(obj, 'model_dump') else obj.dict()
+                result = obj.model_dump(mode='json') if hasattr(obj, 'model_dump') else obj.dict()
 
                 # Fix nested message serialization to preserve all metadata
                 if 'generations' in result and hasattr(obj, 'generations'):
@@ -116,14 +116,14 @@ class ParquetLogger(BaseCallbackHandler):
                                 # Directly serialize the message to preserve all fields
                                 msg = gen.message
                                 if hasattr(msg, 'model_dump'):
-                                    result['generations'][i][j]['message'] = msg.model_dump()
+                                    result['generations'][i][j]['message'] = msg.model_dump(mode='json')
                                 elif hasattr(msg, 'dict'):
                                     result['generations'][i][j]['message'] = msg.dict()
                 return result
 
             # Try various serialization methods in order of preference
             if hasattr(obj, 'model_dump'):  # Pydantic v2
-                return obj.model_dump()
+                return obj.model_dump(mode='json')
             elif hasattr(obj, 'dict'):  # Pydantic v1 / LangChain objects
                 return obj.dict()
             elif hasattr(obj, 'to_dict'):
