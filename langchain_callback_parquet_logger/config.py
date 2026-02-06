@@ -10,6 +10,7 @@ class EventType(Enum):
     LLM_START = "llm_start"
     LLM_END = "llm_end"
     LLM_ERROR = "llm_error"
+    CHAT_MODEL_START = "chat_model_start"
     CHAIN_START = "chain_start"
     CHAIN_END = "chain_end"
     CHAIN_ERROR = "chain_error"
@@ -21,8 +22,9 @@ class EventType(Enum):
 
     @classmethod
     def default_set(cls) -> List[str]:
-        """Return default event types (LLM events only)."""
-        return [cls.LLM_START.value, cls.LLM_END.value, cls.LLM_ERROR.value]
+        """Return default event types (LLM and chat model events)."""
+        return [cls.LLM_START.value, cls.LLM_END.value, cls.LLM_ERROR.value,
+                cls.CHAT_MODEL_START.value]
 
     @classmethod
     def all_events(cls) -> List[str]:
