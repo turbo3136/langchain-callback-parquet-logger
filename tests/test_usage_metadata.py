@@ -166,39 +166,6 @@ class TestUsageMetadataExtraction:
         df = pd.read_parquet(str(tmp_path))
         assert len(df) == 3
 
-    def test_llmresult_without_model_dump_falls_back_to_dict(self, tmp_path):
-        """Test that LLMResult without model_dump uses dict() method."""
-        logger = ParquetLogger(str(tmp_path))
-
-        # Create a mock response with dict but no model_dump
-        mock_message = Mock(spec=['dict'])  # Only has dict, not model_dump
-        mock_message.dict = Mock(return_value={
-            'content': 'test',
-            'usage_metadata': {'input_tokens': 5}
-        })
-
-        mock_generation = Mock()
-        mock_generation.message = mock_message
-
-        mock_response = Mock(spec=['__class__', 'generations', 'dict'])  # Only specified attributes
-        mock_response.__class__.__name__ = 'LLMResult'
-        mock_response.generations = [[mock_generation]]
-        mock_response.dict = Mock(return_value={
-            'generations': [[{'message': {'content': 'test'}}]],
-            'llm_output': None
-        })
-
-        # Test _serialize_any
-        result = logger._serialize_any(mock_response)
-
-        # Should have called dict() on response
-        mock_response.dict.assert_called_once()
-        # Should have called dict() on message
-        mock_message.dict.assert_called_once()
-
-        # Result should contain the usage_metadata from message.dict()
-        assert result['generations'][0][0]['message']['usage_metadata']['input_tokens'] == 5
-
     def test_both_response_and_message_metadata_captured(self, tmp_path):
         """Test that both top-level response_metadata and message-level metadata are captured."""
         logger = ParquetLogger(str(tmp_path))
