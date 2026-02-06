@@ -210,6 +210,115 @@ class TestEnhancedEventLogging:
         payload = json.loads(finish_event['payload'])
         assert payload['data']['finish']['return_values']['answer'] == 'Sunny, 72°F'
     
+    def test_chat_model_start_event(self, temp_log_dir):
+        """Test logging of chat model start event."""
+        logger = ParquetLogger(
+            temp_log_dir,
+            buffer_size=10,
+            event_types=['chat_model_start']
+        )
+
+        # Simulate chat model start with message lists
+        messages = [
+            [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Hello!"}
+            ]
+        ]
+
+        logger.on_chat_model_start(
+            {'_type': 'chat_openai', 'kwargs': {'model_name': 'gpt-4'}},
+            messages,
+            run_id='chat-123',
+            parent_run_id='chain-456',
+            tags=['test-tag']
+        )
+
+        logger.flush()
+
+        files = list(Path(temp_log_dir).glob("**/*.parquet"))
+        assert len(files) == 1
+
+        df = pd.read_parquet(files[0])
+        assert len(df) == 1
+        assert df.iloc[0]['event_type'] == 'chat_model_start'
+        assert df.iloc[0]['run_id'] == 'chat-123'
+        assert df.iloc[0]['parent_run_id'] == 'chain-456'
+
+        payload = json.loads(df.iloc[0]['payload'])
+        assert payload['data']['llm_type'] == 'chat_openai'
+        assert payload['data']['model'] == 'gpt-4'
+        assert len(payload['data']['messages']) == 1
+        assert len(payload['data']['messages'][0]) == 2
+
+    def test_chat_model_start_in_default_events(self, temp_log_dir):
+        """Test that chat_model_start is included in default event types."""
+        logger = ParquetLogger(temp_log_dir, buffer_size=10)
+
+        # chat_model_start should be logged by default
+        messages = [[{"role": "user", "content": "Hi"}]]
+        logger.on_chat_model_start(
+            {'_type': 'chat_openai', 'kwargs': {'model_name': 'gpt-4'}},
+            messages,
+            run_id='chat-default-123'
+        )
+
+        logger.flush()
+
+        files = list(Path(temp_log_dir).glob("**/*.parquet"))
+        df = pd.read_parquet(files[0])
+        assert len(df) == 1
+        assert df.iloc[0]['event_type'] == 'chat_model_start'
+
+    def test_chat_model_start_filtered_out(self, temp_log_dir):
+        """Test that chat_model_start is filtered when not in event_types."""
+        logger = ParquetLogger(
+            temp_log_dir,
+            buffer_size=10,
+            event_types=['llm_start', 'llm_end']
+        )
+
+        messages = [[{"role": "user", "content": "Hi"}]]
+        logger.on_chat_model_start(
+            {'_type': 'chat_openai', 'kwargs': {}},
+            messages,
+            run_id='chat-filtered-123'
+        )
+
+        logger.flush()
+
+        files = list(Path(temp_log_dir).glob("**/*.parquet"))
+        assert len(files) == 0  # Nothing written
+
+    def test_chat_model_start_raw_capture(self, temp_log_dir):
+        """Test that raw data is captured in chat_model_start."""
+        logger = ParquetLogger(
+            temp_log_dir,
+            buffer_size=10,
+            event_types=['chat_model_start']
+        )
+
+        messages = [[{"role": "user", "content": "test"}]]
+        logger.on_chat_model_start(
+            {'_type': 'chat_openai', 'kwargs': {'model_name': 'gpt-4'}},
+            messages,
+            run_id='chat-raw-123',
+            tags=['tag1'],
+            metadata={'key': 'value'}
+        )
+
+        logger.flush()
+
+        files = list(Path(temp_log_dir).glob("**/*.parquet"))
+        df = pd.read_parquet(files[0])
+        payload = json.loads(df.iloc[0]['payload'])
+
+        # Verify raw section has the original kwargs
+        assert 'raw' in payload
+        assert 'serialized' in payload['raw']
+        assert 'messages' in payload['raw']
+        assert payload['raw']['tags'] == ['tag1']
+
     def test_parent_run_id_hierarchy(self, temp_log_dir):
         """Test that parent_run_id properly tracks hierarchy."""
         logger = ParquetLogger(
@@ -279,31 +388,41 @@ class TestEnhancedEventLogging:
         assert all(tool_events['parent_run_id'] == 'llm-1')
     
     def test_backward_compatibility(self, temp_log_dir):
-        """Test that default behavior maintains backward compatibility."""
-        # Logger without event_types should default to LLM events only
+        """Test that default behavior logs LLM and chat model events."""
+        # Logger without event_types should default to LLM + chat_model events
         logger = ParquetLogger(temp_log_dir, buffer_size=10)
-        
+
         # Should log LLM events
         logger.on_llm_start(
             {'kwargs': {'model_name': 'gpt-4'}},
             ['test'],
             run_id='llm-1'
         )
-        
+
+        # Should log chat model events (now in default set)
+        logger.on_chat_model_start(
+            {'_type': 'chat_openai', 'kwargs': {'model_name': 'gpt-4'}},
+            [[{"role": "user", "content": "test"}]],
+            run_id='chat-1'
+        )
+
         # Should NOT log chain events (not in default)
         logger.on_chain_start(
             {'name': 'chain'},
             {'input': 'test'},
             run_id='chain-1'
         )
-        
+
         logger.flush()
-        
-        # Only LLM event should be logged
+
+        # LLM and chat_model events should be logged, but not chain
         files = list(Path(temp_log_dir).glob("**/*.parquet"))
         df = pd.read_parquet(files[0])
-        assert len(df) == 1
-        assert df.iloc[0]['event_type'] == 'llm_start'
+        assert len(df) == 2
+        event_types = set(df['event_type'].values)
+        assert 'llm_start' in event_types
+        assert 'chat_model_start' in event_types
+        assert 'chain_start' not in event_types
     
     def test_parent_run_id_column_always_present(self, temp_log_dir):
         """Test that parent_run_id column is always present even when empty."""

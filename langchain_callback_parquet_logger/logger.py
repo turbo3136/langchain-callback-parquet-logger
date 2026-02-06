@@ -7,7 +7,7 @@ import atexit
 import warnings
 from pathlib import Path
 from datetime import datetime, date, timezone
-from typing import Dict, Any, List, Optional, Literal, Set
+from typing import Dict, Any, List, Optional, Literal, Set, Sequence
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -196,14 +196,11 @@ class ParquetLogger(BaseCallbackHandler):
         return metadata
 
     def _convert_response(self, response: Any) -> Dict[str, Any]:
-        """Convert LangChain response to dict format."""
+        """Convert LangChain response to dict format using _serialize_any."""
         try:
-            if hasattr(response, 'dict'):
-                return response.dict()
-            elif hasattr(response, 'to_dict'):
-                return response.to_dict()
-            elif isinstance(response, dict):
-                return response
+            result = self._serialize_any(response)
+            if isinstance(result, dict):
+                return result
             else:
                 return {'content': str(response)}
         except Exception as e:
@@ -251,6 +248,24 @@ class ParquetLogger(BaseCallbackHandler):
         kwargs['serialized'] = serialized
         kwargs['prompts'] = prompts
         self._handle_event('llm_start', data, **kwargs)
+
+    def on_chat_model_start(self, serialized: Dict, messages: List[List[Any]], **kwargs):
+        """Log chat model start event.
+
+        Called when a chat model starts running. Chat models (e.g., ChatOpenAI)
+        may fire this instead of on_llm_start.
+        """
+        data = {
+            "messages": self._serialize_any(messages),
+            "llm_type": serialized.get('_type', 'unknown'),
+            "serialized": serialized,
+            "model": serialized.get('kwargs', {}).get('model_name', ''),
+            "invocation_params": serialized.get('kwargs', {}),
+        }
+
+        kwargs['serialized'] = serialized
+        kwargs['messages'] = messages
+        self._handle_event('chat_model_start', data, **kwargs)
 
     def on_llm_end(self, response, **kwargs):
         """Log LLM end event."""
