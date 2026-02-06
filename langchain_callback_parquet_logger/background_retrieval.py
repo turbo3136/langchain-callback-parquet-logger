@@ -183,7 +183,14 @@ async def retrieve_background_responses(
                         rate_limit_reset = time.time() + float(headers['x-ratelimit-reset-after'])
                 
                 # Log success
-                response_data = response.model_dump(mode='json') if hasattr(response, 'model_dump') else dict(response)
+                if hasattr(response, 'model_dump'):
+                    response_data = response.model_dump(mode='json', by_alias=False)
+                elif hasattr(response, 'to_dict'):
+                    response_data = response.to_dict()
+                elif hasattr(response, '__dict__'):
+                    response_data = {k: v for k, v in response.__dict__.items() if not k.startswith('_')}
+                else:
+                    response_data = {'response': str(response)}
                 
                 if logger:
                     logger._add_entry({

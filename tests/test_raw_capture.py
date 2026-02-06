@@ -73,14 +73,14 @@ class TestRawDataCapture:
             logger = ParquetLogger(temp_dir, buffer_size=1)
 
             # Create mock response - use spec to prevent auto-creation of attributes
-            response = Mock(spec=['generations', 'llm_output', 'dict'])
+            response = Mock(spec=['generations', 'llm_output', 'model_dump'])
             response.generations = [["Generated text"]]
             response.llm_output = {
                 'token_usage': {'total_tokens': 100},
                 'model_name': 'gpt-4'
             }
-            # The dict method will be called by _serialize_any
-            response.dict.return_value = {
+            # The model_dump method will be called by _serialize_any
+            response.model_dump.return_value = {
                 'generations': [['Generated text']],
                 'llm_output': {'token_usage': {'total_tokens': 100}}
             }
@@ -101,7 +101,7 @@ class TestRawDataCapture:
 
             # Check raw contains serialized response
             assert 'response' in payload['raw']
-            # The response is serialized via dict() method
+            # The response is serialized via model_dump() method
             assert payload['raw']['response'] == {
                 'generations': [['Generated text']],
                 'llm_output': {'token_usage': {'total_tokens': 100}}
