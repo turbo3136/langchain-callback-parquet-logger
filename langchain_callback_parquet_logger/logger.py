@@ -134,7 +134,9 @@ class ParquetLogger(BaseCallbackHandler):
 
             # Try various serialization methods in order of preference
             if hasattr(obj, 'model_dump'):  # Pydantic v2
-                return obj.model_dump(mode='json', by_alias=False)
+                result = obj.model_dump(mode='json', by_alias=False)
+                if isinstance(result, (dict, list, str, int, float, bool, type(None))):
+                    return result
             elif hasattr(obj, 'to_dict'):
                 return obj.to_dict()
             elif hasattr(obj, '__dict__'):
@@ -153,7 +155,9 @@ class ParquetLogger(BaseCallbackHandler):
             # Defensive handling for Pydantic models that weren't pre-serialized
             if hasattr(o, 'model_dump'):
                 try:
-                    return o.model_dump(mode='json', by_alias=False)
+                    result = o.model_dump(mode='json', by_alias=False)
+                    if isinstance(result, (dict, list, str, int, float, bool, type(None))):
+                        return result
                 except Exception:
                     pass  # Fall through to string conversion
             if hasattr(o, '__str__'):
