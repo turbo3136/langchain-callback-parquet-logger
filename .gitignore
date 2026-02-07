@@ -24,6 +24,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.pytest_cache
 
 # Logs
 *.log
@@ -42,6 +43,7 @@ test_logs/
 *.swp
 *.swo
 *~
+.claude
 
 # OS
 .DS_Store
