@@ -134,7 +134,9 @@ class ParquetLogger(BaseCallbackHandler):
 
             # Try various serialization methods in order of preference
             if hasattr(obj, 'model_dump'):  # Pydantic v2
-                return obj.model_dump(mode='json', by_alias=False)
+                result = obj.model_dump(mode='json', by_alias=False)
+                if isinstance(result, (dict, list, str, int, float, bool, type(None))):
+                    return result
             elif hasattr(obj, 'to_dict'):
                 return obj.to_dict()
             elif hasattr(obj, '__dict__'):
@@ -150,6 +152,14 @@ class ParquetLogger(BaseCallbackHandler):
     def _safe_json_dumps(self, obj: Any) -> str:
         """Convert object to JSON string safely."""
         def default(o):
+            # Defensive handling for Pydantic models that weren't pre-serialized
+            if hasattr(o, 'model_dump'):
+                try:
+                    result = o.model_dump(mode='json', by_alias=False)
+                    if isinstance(result, (dict, list, str, int, float, bool, type(None))):
+                        return result
+                except Exception:
+                    pass  # Fall through to string conversion
             if hasattr(o, '__str__'):
                 return str(o)
             return f"<{type(o).__name__}>"
@@ -321,9 +331,12 @@ class ParquetLogger(BaseCallbackHandler):
 
     def on_chain_end(self, outputs: Dict[str, Any], **kwargs):
         """Log chain end event."""
-        # Capture everything in raw
-        kwargs['outputs'] = self._serialize_any(outputs)
-        self._handle_event('chain_end', {"outputs": outputs}, **kwargs)
+        # Serialize outputs first to handle Pydantic models
+        serialized_outputs = self._serialize_any(outputs)
+        # Capture serialized version in raw
+        kwargs['outputs'] = serialized_outputs
+        # Use serialized version in data section too
+        self._handle_event('chain_end', {"outputs": serialized_outputs}, **kwargs)
 
     def on_chain_error(self, error: Exception, **kwargs):
         """Log chain error event."""
@@ -352,9 +365,12 @@ class ParquetLogger(BaseCallbackHandler):
 
     def on_tool_end(self, output: str, **kwargs):
         """Log tool end event."""
-        # Capture everything in raw
-        kwargs['output'] = self._serialize_any(output)
-        self._handle_event('tool_end', {"output": output}, **kwargs)
+        # Serialize output first to handle Pydantic models from structured output
+        serialized_output = self._serialize_any(output)
+        # Capture serialized version in raw
+        kwargs['output'] = serialized_output
+        # Use serialized version in data section too
+        self._handle_event('tool_end', {"output": serialized_output}, **kwargs)
 
     def on_tool_error(self, error: Exception, **kwargs):
         """Log tool error event."""
