@@ -1,7 +1,7 @@
 """Configuration dataclasses for LangChain Parquet Logger."""
 
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, List, Literal, Type
+from typing import Dict, Any, Optional, List, Literal, Type, Union
 from enum import Enum
 
 
@@ -39,6 +39,8 @@ class S3Config:
     prefix: str = "langchain-logs/"
     on_failure: Literal["error", "continue"] = "error"
     retry_attempts: int = 3
+    connect_timeout: int = 10  # S3 connection timeout in seconds
+    read_timeout: int = 30  # S3 read timeout in seconds
 
     def __post_init__(self):
         """Ensure prefix ends with /."""
@@ -67,6 +69,7 @@ class ProcessingConfig:
     return_results: bool = False
     event_types: Optional[List[str]] = None
     partition_on: Optional[Literal["date"]] = "date"
+    row_timeout: Optional[float] = None  # Per-row timeout in seconds (None = no timeout)
 
     def __post_init__(self):
         """Set default event types if not specified."""

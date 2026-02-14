@@ -2,6 +2,7 @@
 """Core Parquet logger for LangChain callbacks."""
 
 import json
+import queue
 import threading
 import atexit
 import warnings
@@ -80,6 +81,15 @@ class ParquetLogger(BaseCallbackHandler):
 
         self.buffer = []
         self.lock = threading.Lock()
+        self._write_queue = queue.Queue()
+        self._writer_errors = []
+        self._writer_errors_lock = threading.Lock()
+
+        # Start background writer thread
+        self._writer_thread = threading.Thread(
+            target=self._writer_loop, daemon=True, name="parquet-writer"
+        )
+        self._writer_thread.start()
 
         # Register flush to run on program exit
         atexit.register(self.flush)
@@ -416,28 +426,60 @@ class ParquetLogger(BaseCallbackHandler):
 
     # Buffer management
     def _add_entry(self, entry):
-        """Add entry to buffer and flush if needed."""
+        """Add entry to buffer and enqueue writes when buffer is full.
+
+        Never does I/O directly — all writes happen on the background writer thread.
+        """
         with self.lock:
             self.buffer.append(entry)
             if len(self.buffer) >= self.buffer_size:
-                self._flush_locked()
+                buffer_to_write = self.buffer.copy()
+                self.buffer = []
+                self._write_queue.put(("write", buffer_to_write))
 
-    def flush(self):
-        """Manual flush of the buffer."""
+    def flush(self, timeout: float = 120.0):
+        """Flush the buffer and wait for all pending writes to complete.
+
+        Args:
+            timeout: Maximum seconds to wait for pending writes (default: 120).
+        """
+        # Drain buffer under lock
         with self.lock:
-            self._flush_locked()
+            if self.buffer:
+                buffer_to_write = self.buffer.copy()
+                self.buffer = []
+                self._write_queue.put(("write", buffer_to_write))
 
-    def _flush_locked(self):
-        """Internal flush that assumes lock is already held."""
-        if not self.buffer:
-            return
+        # Send a barrier and wait for the writer thread to process everything
+        barrier = threading.Event()
+        self._write_queue.put(("barrier", barrier))
+        barrier.wait(timeout=timeout)
 
-        # Copy buffer and clear it while holding lock
-        buffer_to_write = self.buffer.copy()
-        self.buffer = []
+        # Raise any accumulated errors from the writer thread
+        with self._writer_errors_lock:
+            if self._writer_errors:
+                errors = self._writer_errors.copy()
+                self._writer_errors = []
+                raise errors[0]
 
-        # Release lock before doing I/O
-        self._write_buffer(buffer_to_write)
+    def _writer_loop(self):
+        """Background thread that processes write queue items."""
+        while True:
+            try:
+                item = self._write_queue.get()
+                if item is None:
+                    break
+                action, payload = item
+                if action == "write":
+                    try:
+                        self._write_buffer(payload)
+                    except Exception as e:
+                        with self._writer_errors_lock:
+                            self._writer_errors.append(e)
+                elif action == "barrier":
+                    payload.set()  # signal the Event
+            except Exception:
+                pass  # keep the writer alive
 
     def _write_buffer(self, buffer):
         """Write buffer to Parquet file (called without lock held)."""
