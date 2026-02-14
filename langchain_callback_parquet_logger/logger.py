@@ -110,6 +110,12 @@ class ParquetLogger(BaseCallbackHandler):
         except ImportError:
             return False
 
+    def _model_dump_quiet(self, obj: Any) -> Any:
+        """Call model_dump with Pydantic serialization warnings suppressed."""
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning, module=r"^pydantic")
+            return obj.model_dump(mode='json', by_alias=False)
+
     def _serialize_any(self, obj: Any) -> Any:
         """Try all possible serialization methods for complete data capture."""
         try:
@@ -117,7 +123,7 @@ class ParquetLogger(BaseCallbackHandler):
             if obj.__class__.__name__ == 'LLMResult':
                 # First get the standard serialization
                 if hasattr(obj, 'model_dump'):
-                    result = obj.model_dump(mode='json', by_alias=False)
+                    result = self._model_dump_quiet(obj)
                 elif hasattr(obj, 'to_dict'):
                     result = obj.to_dict()
                 elif hasattr(obj, '__dict__'):
@@ -133,7 +139,7 @@ class ParquetLogger(BaseCallbackHandler):
                                 # Directly serialize the message to preserve all fields
                                 msg = gen.message
                                 if hasattr(msg, 'model_dump'):
-                                    result['generations'][i][j]['message'] = msg.model_dump(mode='json', by_alias=False)
+                                    result['generations'][i][j]['message'] = self._model_dump_quiet(msg)
                                 elif hasattr(msg, 'to_dict'):
                                     result['generations'][i][j]['message'] = msg.to_dict()
                                 elif hasattr(msg, '__dict__'):
@@ -144,7 +150,7 @@ class ParquetLogger(BaseCallbackHandler):
 
             # Try various serialization methods in order of preference
             if hasattr(obj, 'model_dump'):  # Pydantic v2
-                result = obj.model_dump(mode='json', by_alias=False)
+                result = self._model_dump_quiet(obj)
                 if isinstance(result, (dict, list, str, int, float, bool, type(None))):
                     return result
             elif hasattr(obj, 'to_dict'):
@@ -165,7 +171,7 @@ class ParquetLogger(BaseCallbackHandler):
             # Defensive handling for Pydantic models that weren't pre-serialized
             if hasattr(o, 'model_dump'):
                 try:
-                    result = o.model_dump(mode='json', by_alias=False)
+                    result = self._model_dump_quiet(o)
                     if isinstance(result, (dict, list, str, int, float, bool, type(None))):
                         return result
                 except Exception:

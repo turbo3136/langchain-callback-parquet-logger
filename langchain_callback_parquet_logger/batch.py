@@ -96,16 +96,19 @@ async def batch_run(
                 result = await llm.ainvoke(**invoke_kwargs)
             if progress_bar:
                 progress_bar.update(1)
+                progress_bar.refresh()
             return result
         except asyncio.TimeoutError:
             if progress_bar:
                 progress_bar.update(1)
+                progress_bar.refresh()
             if return_exceptions:
                 return TimeoutError(f"Row timed out after {row_timeout}s")
             raise TimeoutError(f"Row timed out after {row_timeout}s")
         except Exception as e:
             if progress_bar:
                 progress_bar.update(1)
+                progress_bar.refresh()
             if return_exceptions:
                 return e
             raise

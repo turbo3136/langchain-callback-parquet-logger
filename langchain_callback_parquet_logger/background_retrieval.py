@@ -27,6 +27,13 @@ except ImportError:
 from .logger import ParquetLogger
 
 
+def _model_dump_quiet(obj):
+    """Call model_dump with Pydantic serialization warnings suppressed."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning, module=r"^pydantic")
+        return obj.model_dump(mode='json', by_alias=False)
+
+
 async def retrieve_background_responses(
     df: "pd.DataFrame",
     openai_client,
@@ -127,6 +134,7 @@ async def retrieve_background_responses(
         if response_id in processed_ids:
             if progress_bar:
                 progress_bar.update(1)
+                progress_bar.refresh()
             if return_results:
                 return {
                     'response_id': response_id,
@@ -177,7 +185,7 @@ async def retrieve_background_responses(
                 
                 # Log success
                 if hasattr(response, 'model_dump'):
-                    response_data = response.model_dump(mode='json', by_alias=False)
+                    response_data = _model_dump_quiet(response)
                 elif hasattr(response, 'to_dict'):
                     response_data = response.to_dict()
                 elif hasattr(response, '__dict__'):
@@ -205,7 +213,8 @@ async def retrieve_background_responses(
                 
                 if progress_bar:
                     progress_bar.update(1)
-                
+                    progress_bar.refresh()
+
                 if return_results:
                     return {
                         'response_id': response_id,
@@ -262,7 +271,8 @@ async def retrieve_background_responses(
         
         if progress_bar:
             progress_bar.update(1)
-        
+            progress_bar.refresh()
+
         if return_results:
             return {
                 'response_id': response_id,
@@ -295,7 +305,8 @@ async def retrieve_background_responses(
                 
                 if progress_bar:
                     progress_bar.update(1)
-                
+                    progress_bar.refresh()
+
                 if return_results:
                     results.append({
                         'response_id': response_id,
