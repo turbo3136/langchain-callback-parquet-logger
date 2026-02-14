@@ -1,5 +1,6 @@
 """Batch processing utilities for DataFrame operations with LangChain."""
 
+import asyncio
 import os
 from pathlib import Path
 from datetime import date, datetime, timezone
@@ -27,6 +28,7 @@ async def batch_run(
     show_progress: bool = True,
     return_exceptions: bool = True,
     return_results: bool = True,
+    row_timeout: Optional[float] = None,
 ) -> Optional[list]:
     """
     Low-level async batch processing for DataFrames.
@@ -44,6 +46,8 @@ async def batch_run(
         show_progress: Show progress bar (auto-detects notebook vs terminal)
         return_exceptions: Return exceptions instead of raising
         return_results: If False, don't keep results in memory (useful for huge DataFrames)
+        row_timeout: Per-row timeout in seconds (None = no timeout). Useful with
+            slow service tiers (e.g. OpenAI flex) to prevent indefinite hangs.
 
     Returns:
         List of results in same order as DataFrame rows, or None if return_results=False
@@ -63,18 +67,9 @@ async def batch_run(
     progress_bar = None
     if show_progress:
         try:
-            # Try to use tqdm (auto-detects notebook vs terminal)
-            try:
-                from IPython import get_ipython
-                if get_ipython() is not None:
-                    from tqdm.notebook import tqdm
-                else:
-                    from tqdm import tqdm
-            except ImportError:
-                from tqdm import tqdm
+            from tqdm.auto import tqdm
             progress_bar = tqdm(total=len(rows), desc="Processing batch")
-        except ImportError:
-            # Fall back to simple counter
+        except Exception:
             progress_bar = None
             print(f"Processing {len(rows)} rows...")
 
@@ -92,10 +87,22 @@ async def batch_run(
             invoke_kwargs["tools"] = row[tools_col]
 
         try:
-            result = await llm.ainvoke(**invoke_kwargs)
+            if row_timeout:
+                result = await asyncio.wait_for(
+                    llm.ainvoke(**invoke_kwargs),
+                    timeout=row_timeout
+                )
+            else:
+                result = await llm.ainvoke(**invoke_kwargs)
             if progress_bar:
                 progress_bar.update(1)
             return result
+        except asyncio.TimeoutError:
+            if progress_bar:
+                progress_bar.update(1)
+            if return_exceptions:
+                return TimeoutError(f"Row timed out after {row_timeout}s")
+            raise TimeoutError(f"Row timed out after {row_timeout}s")
         except Exception as e:
             if progress_bar:
                 progress_bar.update(1)
@@ -281,7 +288,8 @@ async def batch_process(
             max_concurrency=processing_config.max_concurrency,
             show_progress=processing_config.show_progress,
             return_exceptions=processing_config.return_exceptions,
-            return_results=processing_config.return_results
+            return_results=processing_config.return_results,
+            row_timeout=processing_config.row_timeout
         )
 
     # Print completion message

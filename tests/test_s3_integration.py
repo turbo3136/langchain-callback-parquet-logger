@@ -19,7 +19,7 @@ class TestS3Integration:
         # Setup mock S3 client
         mock_s3_client = MagicMock()
         mock_client.return_value = mock_s3_client
-        
+
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create logger with S3 configuration
             logger = ParquetLogger(
@@ -31,14 +31,17 @@ class TestS3Integration:
                     on_failure="error"
                 )
             )
-            
+
             # Trigger a log entry
             logger.on_llm_start(
                 serialized={"name": "test"},
                 prompts=["test prompt"],
                 run_id="test-run-id"
             )
-            
+
+            # Wait for background writer to complete
+            logger.flush()
+
             # Verify S3 upload was called
             assert mock_s3_client.put_object.called
             call_args = mock_s3_client.put_object.call_args[1]
@@ -57,7 +60,7 @@ class TestS3Integration:
             None  # Success on third attempt
         ]
         mock_client.return_value = mock_s3_client
-        
+
         with tempfile.TemporaryDirectory() as tmpdir:
             logger = ParquetLogger(
                 log_dir=tmpdir,
@@ -68,14 +71,17 @@ class TestS3Integration:
                     on_failure="error"
                 )
             )
-            
+
             # Trigger a log entry
             logger.on_llm_start(
                 serialized={"name": "test"},
                 prompts=["test prompt"],
                 run_id="test-run-id"
             )
-            
+
+            # Wait for background writer to complete
+            logger.flush()
+
             # Verify S3 upload was retried 3 times
             assert mock_s3_client.put_object.call_count == 3
     
@@ -86,7 +92,7 @@ class TestS3Integration:
         mock_s3_client = MagicMock()
         mock_s3_client.put_object.side_effect = Exception("Persistent error")
         mock_client.return_value = mock_s3_client
-        
+
         with tempfile.TemporaryDirectory() as tmpdir:
             logger = ParquetLogger(
                 log_dir=tmpdir,
@@ -97,14 +103,17 @@ class TestS3Integration:
                     on_failure="error"
                 )
             )
-            
-            # Should raise RuntimeError when S3 upload fails
+
+            # Trigger a log entry
+            logger.on_llm_start(
+                serialized={"name": "test"},
+                prompts=["test prompt"],
+                run_id="test-run-id"
+            )
+
+            # S3 error surfaces at flush() time from the background writer
             with pytest.raises(RuntimeError, match="Failed to upload to S3"):
-                logger.on_llm_start(
-                    serialized={"name": "test"},
-                    prompts=["test prompt"],
-                    run_id="test-run-id"
-                )
+                logger.flush()
     
     @patch('langchain_callback_parquet_logger.storage.S3Storage.client', new_callable=PropertyMock)
     def test_s3_upload_failure_continue_mode(self, mock_client, mock_llm, capsys):
@@ -113,7 +122,7 @@ class TestS3Integration:
         mock_s3_client = MagicMock()
         mock_s3_client.put_object.side_effect = Exception("Persistent error")
         mock_client.return_value = mock_s3_client
-        
+
         with tempfile.TemporaryDirectory() as tmpdir:
             logger = ParquetLogger(
                 log_dir=tmpdir,
@@ -124,18 +133,21 @@ class TestS3Integration:
                     on_failure="continue"
                 )
             )
-            
+
             # Should not raise error, just print warning
             logger.on_llm_start(
                 serialized={"name": "test"},
                 prompts=["test prompt"],
                 run_id="test-run-id"
             )
-            
+
+            # Wait for background writer to complete
+            logger.flush()
+
             # Check that error was printed
             captured = capsys.readouterr()
             assert "S3 upload failed (continuing)" in captured.out
-            
+
             # Verify local file still exists
             files = list(Path(tmpdir).rglob("*.parquet"))
             assert len(files) == 1
@@ -147,27 +159,27 @@ class TestS3Integration:
                 log_dir=tmpdir,
                 buffer_size=1
             )
-            
-            # No S3 config configured - logger doesn't expose this attribute
-            # Just verify it works without S3
-            
+
             # Should work normally without S3
             logger.on_llm_start(
                 serialized={"name": "test"},
                 prompts=["test prompt"],
                 run_id="test-run-id"
             )
-            
+
+            # Wait for background writer to complete
+            logger.flush()
+
             # Verify local file exists
             files = list(Path(tmpdir).rglob("*.parquet"))
             assert len(files) == 1
     
     def test_s3_import_error_when_boto3_missing(self):
         """Test that ImportError is raised when boto3 is not available."""
-        with patch.dict('sys.modules', {'boto3': None}):
+        with patch.dict('sys.modules', {'boto3': None, 'botocore': None, 'botocore.config': None}):
             with tempfile.TemporaryDirectory() as tmpdir:
                 # Since boto3 import happens lazily in S3Storage.client property,
-                # we need to trigger the write to see the ImportError
+                # we need to trigger the write and flush to see the ImportError
                 with pytest.raises((ImportError, RuntimeError)) as exc_info:
                     logger = ParquetLogger(
                         log_dir=tmpdir,
@@ -182,13 +194,15 @@ class TestS3Integration:
                         prompts=["test prompt"],
                         run_id="test-run-id"
                     )
+                    # Wait for background writer — error surfaces here
+                    logger.flush()
     
     @patch('langchain_callback_parquet_logger.storage.S3Storage.client', new_callable=PropertyMock)
     def test_s3_key_structure_with_partitioning(self, mock_client, mock_llm):
         """Test S3 key structure with date partitioning."""
         mock_s3_client = MagicMock()
         mock_client.return_value = mock_s3_client
-        
+
         with tempfile.TemporaryDirectory() as tmpdir:
             logger = ParquetLogger(
                 log_dir=tmpdir,
@@ -199,13 +213,16 @@ class TestS3Integration:
                 ),
                 partition_on="date"
             )
-            
+
             logger.on_llm_start(
                 serialized={"name": "test"},
                 prompts=["test prompt"],
                 run_id="test-run-id"
             )
-            
+
+            # Wait for background writer to complete
+            logger.flush()
+
             # Verify S3 key includes date partition
             call_args = mock_s3_client.put_object.call_args[1]
             key = call_args['Key']
@@ -217,7 +234,7 @@ class TestS3Integration:
         """Test S3 key structure without partitioning."""
         mock_s3_client = MagicMock()
         mock_client.return_value = mock_s3_client
-        
+
         with tempfile.TemporaryDirectory() as tmpdir:
             logger = ParquetLogger(
                 log_dir=tmpdir,
@@ -228,13 +245,16 @@ class TestS3Integration:
                 ),
                 partition_on=None
             )
-            
+
             logger.on_llm_start(
                 serialized={"name": "test"},
                 prompts=["test prompt"],
                 run_id="test-run-id"
             )
-            
+
+            # Wait for background writer to complete
+            logger.flush()
+
             # Verify S3 key doesn't include date partition
             call_args = mock_s3_client.put_object.call_args[1]
             key = call_args['Key']

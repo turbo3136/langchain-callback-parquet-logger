@@ -55,11 +55,16 @@ class S3Storage(StorageBackend):
 
     @property
     def client(self):
-        """Lazy load boto3 client."""
+        """Lazy load boto3 client with configured timeouts."""
         if self._client is None:
             try:
                 import boto3
-                self._client = boto3.client('s3')
+                from botocore.config import Config as BotoConfig
+                boto_config = BotoConfig(
+                    connect_timeout=self.config.connect_timeout,
+                    read_timeout=self.config.read_timeout,
+                )
+                self._client = boto3.client('s3', config=boto_config)
             except ImportError:
                 raise ImportError(
                     "boto3 is required for S3 support. "

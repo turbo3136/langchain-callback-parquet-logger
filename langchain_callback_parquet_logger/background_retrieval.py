@@ -87,16 +87,9 @@ async def retrieve_background_responses(
     progress_bar = None
     if show_progress:
         try:
-            try:
-                from IPython import get_ipython
-                if get_ipython() is not None:
-                    from tqdm.notebook import tqdm
-                else:
-                    from tqdm import tqdm
-            except ImportError:
-                from tqdm import tqdm
+            from tqdm.auto import tqdm
             progress_bar = tqdm(total=len(df), desc="Retrieving responses", position=0, leave=True)
-        except ImportError:
+        except Exception:
             print(f"Retrieving {len(df)} responses...")
     
     # Load checkpoint if exists

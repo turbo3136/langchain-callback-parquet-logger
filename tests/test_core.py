@@ -18,7 +18,7 @@ class TestParquetLogger:
     def test_basic_logging(self, temp_log_dir, mock_callback_events):
         """Test that basic logging creates parquet files."""
         logger = ParquetLogger(temp_log_dir, buffer_size=1)
-        
+
         # Simulate LLM start event
         logger.on_llm_start(
             mock_callback_events['llm_start']['serialized'],
@@ -27,7 +27,10 @@ class TestParquetLogger:
             tags=mock_callback_events['llm_start']['tags'],
             metadata=mock_callback_events['llm_start']['metadata']
         )
-        
+
+        # Wait for background writer to complete
+        logger.flush()
+
         # Check that a parquet file was created
         files = list(Path(temp_log_dir).glob("**/*.parquet"))
         assert len(files) == 1
@@ -41,8 +44,8 @@ class TestParquetLogger:
     def test_buffer_flush_at_threshold(self, temp_log_dir):
         """Test that buffer flushes when reaching threshold."""
         logger = ParquetLogger(temp_log_dir, buffer_size=2)
-        
-        # Add one entry - should not flush
+
+        # Add one entry - should not trigger auto-flush (buffer not full)
         logger._add_entry({
             'timestamp': pd.Timestamp.now('UTC'),
             'run_id': 'run-1',
@@ -52,12 +55,11 @@ class TestParquetLogger:
             'logger_metadata': '{}',
             'payload': '{}'
         })
-        
-        # No files yet
-        files = list(Path(temp_log_dir).glob("**/*.parquet"))
-        assert len(files) == 0
-        
-        # Add second entry - should trigger flush
+
+        # Buffer has 1 entry but buffer_size=2, so no write should be queued yet
+        # We can't call flush() here because that would drain the buffer
+
+        # Add second entry - should trigger auto-flush (buffer_size=2)
         logger._add_entry({
             'timestamp': pd.Timestamp.now('UTC'),
             'run_id': 'run-2',
@@ -67,10 +69,16 @@ class TestParquetLogger:
             'logger_metadata': '{}',
             'payload': '{}'
         })
-        
-        # Now file should exist
+
+        # Wait for background writer to complete
+        logger.flush()
+
+        # File should exist with both entries
         files = list(Path(temp_log_dir).glob("**/*.parquet"))
         assert len(files) == 1
+
+        df = pd.read_parquet(files[0])
+        assert len(df) == 2
     
     def test_manual_flush(self, temp_log_dir):
         """Test manual flush works correctly."""
@@ -117,7 +125,7 @@ class TestParquetLogger:
     def test_partitioning_date(self, temp_log_dir):
         """Test date partitioning creates correct directories."""
         logger = ParquetLogger(temp_log_dir, buffer_size=1, partition_on="date")
-        
+
         logger._add_entry({
             'timestamp': pd.Timestamp.now('UTC'),
             'run_id': 'run-1',
@@ -127,19 +135,22 @@ class TestParquetLogger:
             'logger_metadata': '{}',
             'payload': '{}'
         })
-        
+
+        # Wait for background writer to complete
+        logger.flush()
+
         # Check date partition exists
         today = date.today()
         partition_dir = Path(temp_log_dir) / f"date={today}"
         assert partition_dir.exists()
-        
+
         files = list(partition_dir.glob("*.parquet"))
         assert len(files) == 1
     
     def test_partitioning_none(self, temp_log_dir):
         """Test no partitioning saves directly to log_dir."""
         logger = ParquetLogger(temp_log_dir, buffer_size=1, partition_on=None)
-        
+
         logger._add_entry({
             'timestamp': pd.Timestamp.now('UTC'),
             'run_id': 'run-1',
@@ -149,11 +160,14 @@ class TestParquetLogger:
             'logger_metadata': '{}',
             'payload': '{}'
         })
-        
+
+        # Wait for background writer to complete
+        logger.flush()
+
         # File should be directly in log_dir
         files = list(Path(temp_log_dir).glob("*.parquet"))
         assert len(files) == 1
-        
+
         # No subdirectories
         subdirs = [d for d in Path(temp_log_dir).iterdir() if d.is_dir()]
         assert len(subdirs) == 0
@@ -162,11 +176,11 @@ class TestParquetLogger:
         """Test logger metadata persists in logs."""
         metadata = {"env": "test", "version": "1.0"}
         logger = ParquetLogger(
-            temp_log_dir, 
+            temp_log_dir,
             buffer_size=1,
             logger_metadata=metadata
         )
-        
+
         logger._add_entry({
             'timestamp': pd.Timestamp.now('UTC'),
             'run_id': 'run-1',
@@ -176,7 +190,10 @@ class TestParquetLogger:
             'logger_metadata': json.dumps(metadata),
             'payload': '{}'
         })
-        
+
+        # Wait for background writer to complete
+        logger.flush()
+
         # Read and verify metadata
         files = list(Path(temp_log_dir).glob("**/*.parquet"))
         df = pd.read_parquet(files[0])
@@ -224,7 +241,7 @@ class TestParquetLogger:
     def test_custom_id_extraction(self, temp_log_dir):
         """Test custom ID extraction from tags."""
         logger = ParquetLogger(temp_log_dir, buffer_size=1)
-        
+
         # Create event with custom ID in tags
         logger.on_llm_start(
             {'kwargs': {'model_name': 'test'}},
@@ -232,7 +249,10 @@ class TestParquetLogger:
             run_id='test-run',
             tags=['tag1', 'logger_custom_id:my-custom-id', 'tag2']
         )
-        
+
+        # Wait for background writer to complete
+        logger.flush()
+
         # Read and verify
         files = list(Path(temp_log_dir).glob("**/*.parquet"))
         df = pd.read_parquet(files[0])

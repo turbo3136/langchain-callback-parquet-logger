@@ -24,7 +24,7 @@ class TestEnhancedEventLogging:
             buffer_size=1,
             event_types=['chain_start', 'chain_end']
         )
-        
+
         # Should log chain events
         logger.on_chain_start(
             {'name': 'test_chain'},
@@ -32,18 +32,21 @@ class TestEnhancedEventLogging:
             run_id='chain-123',
             parent_run_id='parent-456'
         )
-        
+
         # Should NOT log LLM events
         logger.on_llm_start(
             {'kwargs': {'model_name': 'gpt-4'}},
             ['test prompt'],
             run_id='llm-789'
         )
-        
+
+        # Wait for background writer to complete
+        logger.flush()
+
         # Check that only chain event was logged
         files = list(Path(temp_log_dir).glob("**/*.parquet"))
         assert len(files) == 1
-        
+
         df = pd.read_parquet(files[0])
         assert len(df) == 1
         assert df.iloc[0]['event_type'] == 'chain_start'
@@ -427,7 +430,7 @@ class TestEnhancedEventLogging:
     def test_parent_run_id_column_always_present(self, temp_log_dir):
         """Test that parent_run_id column is always present even when empty."""
         logger = ParquetLogger(temp_log_dir, buffer_size=1)
-        
+
         # Log event without parent_run_id
         logger.on_llm_start(
             {'kwargs': {'model_name': 'gpt-4'}},
@@ -435,10 +438,13 @@ class TestEnhancedEventLogging:
             run_id='llm-1'
             # No parent_run_id provided
         )
-        
+
+        # Wait for background writer to complete
+        logger.flush()
+
         # Check column exists and is empty string
         files = list(Path(temp_log_dir).glob("**/*.parquet"))
         df = pd.read_parquet(files[0])
-        
+
         assert 'parent_run_id' in df.columns
         assert df.iloc[0]['parent_run_id'] == ''
