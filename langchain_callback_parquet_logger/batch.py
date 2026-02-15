@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import warnings
 from pathlib import Path
 from datetime import date, datetime, timezone
 from dataclasses import asdict
@@ -61,20 +62,20 @@ async def batch_run(
         >>> # For most users, use batch_process() instead:
         >>> results = await batch_process(df)  # Logging handled automatically
     """
-    rows = df.to_dict('records')
+    # Suppress Pydantic serialization warnings globally so it covers
+    # LangChain/OpenAI SDK internals calling model_dump() during ainvoke()
+    warnings.filterwarnings("ignore", category=UserWarning, module=r"^pydantic")
 
-    # Setup progress tracking if requested
-    progress_bar = None
-    if show_progress:
-        try:
-            from tqdm.auto import tqdm
-            progress_bar = tqdm(total=len(rows), desc="Processing batch")
-        except Exception:
-            progress_bar = None
-            print(f"Processing {len(rows)} rows...")
+    rows = df.to_dict('records')
+    total_count = len(rows)
+    completed_count = 0
+    # Print after every row for small batches, ~10% intervals for large ones
+    progress_interval = 1 if total_count <= 20 else max(1, total_count // 10)
 
     async def process_row(row: dict) -> Any:
         """Process a single row from the DataFrame."""
+        nonlocal completed_count
+
         # Build invoke kwargs from DataFrame columns
         invoke_kwargs = {"input": row.get(prompt_col)}
 
@@ -94,21 +95,21 @@ async def batch_run(
                 )
             else:
                 result = await llm.ainvoke(**invoke_kwargs)
-            if progress_bar:
-                progress_bar.update(1)
-                progress_bar.refresh()
+            completed_count += 1
+            if show_progress and (completed_count % progress_interval == 0 or completed_count == total_count):
+                print(f"  Processed {completed_count}/{total_count} rows ({100 * completed_count // total_count}%)")
             return result
         except asyncio.TimeoutError:
-            if progress_bar:
-                progress_bar.update(1)
-                progress_bar.refresh()
+            completed_count += 1
+            if show_progress and (completed_count % progress_interval == 0 or completed_count == total_count):
+                print(f"  Processed {completed_count}/{total_count} rows ({100 * completed_count // total_count}%)")
             if return_exceptions:
                 return TimeoutError(f"Row timed out after {row_timeout}s")
             raise TimeoutError(f"Row timed out after {row_timeout}s")
         except Exception as e:
-            if progress_bar:
-                progress_bar.update(1)
-                progress_bar.refresh()
+            completed_count += 1
+            if show_progress and (completed_count % progress_interval == 0 or completed_count == total_count):
+                print(f"  Processed {completed_count}/{total_count} rows ({100 * completed_count // total_count}%)")
             if return_exceptions:
                 return e
             raise
@@ -123,10 +124,6 @@ async def batch_run(
             config={"max_concurrency": max_concurrency},
             return_exceptions=return_exceptions
         )
-
-        if progress_bar:
-            progress_bar.close()
-
         return results
     else:
         # Memory-efficient mode: don't collect results
@@ -135,10 +132,6 @@ async def batch_run(
             config={"max_concurrency": max_concurrency},
             return_exceptions=return_exceptions
         )
-
-        if progress_bar:
-            progress_bar.close()
-
         return None
 
 
@@ -192,6 +185,9 @@ async def batch_process(
         ...     job_config=JobConfig(category='email_validation')
         ... )
     """
+    # Suppress Pydantic serialization warnings globally
+    warnings.filterwarnings("ignore", category=UserWarning, module=r"^pydantic")
+
     # Initialize configs with defaults if not provided
     job_config = job_config or JobConfig()
     storage_config = storage_config or StorageConfig()
