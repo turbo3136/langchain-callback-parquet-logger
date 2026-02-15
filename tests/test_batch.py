@@ -110,21 +110,22 @@ class TestBatchRun:
         assert call_args.kwargs['tools'] == [{'type': 'test'}]
     
     @pytest.mark.asyncio
-    async def test_progress_bar(self, sample_dataframe, mock_llm):
-        """Test that progress bar doesn't crash."""
+    async def test_progress_bar(self, sample_dataframe, mock_llm, capsys):
+        """Test that print-based progress output works."""
         df = sample_dataframe.copy()
         df['prompt'] = df['text']
-        
-        # Test with progress enabled (will try to import tqdm)
-        # If tqdm is not available, it should fall back gracefully
+
         results = await batch_run(
             df,
             mock_llm,
             show_progress=True
         )
-        
+
         assert len(results) == len(df)
         assert mock_llm.ainvoke.call_count == len(df)
+
+        captured = capsys.readouterr()
+        assert "Processed" in captured.out
     
     @pytest.mark.asyncio
     async def test_exception_handling(self, sample_dataframe):

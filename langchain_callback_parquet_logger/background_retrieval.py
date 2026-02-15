@@ -27,13 +27,6 @@ except ImportError:
 from .logger import ParquetLogger
 
 
-def _model_dump_quiet(obj):
-    """Call model_dump with Pydantic serialization warnings suppressed."""
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=UserWarning, module=r"^pydantic")
-        return obj.model_dump(mode='json', by_alias=False)
-
-
 async def retrieve_background_responses(
     df: "pd.DataFrame",
     openai_client,
@@ -81,6 +74,9 @@ async def retrieve_background_responses(
     """
     if pd is None:
         raise ImportError("pandas is required for background retrieval. Install with: pip install pandas")
+
+    # Suppress Pydantic serialization warnings globally
+    warnings.filterwarnings("ignore", category=UserWarning, module=r"^pydantic")
     
     # Validate required columns
     if response_id_col not in df.columns:
@@ -185,7 +181,7 @@ async def retrieve_background_responses(
                 
                 # Log success
                 if hasattr(response, 'model_dump'):
-                    response_data = _model_dump_quiet(response)
+                    response_data = response.model_dump(mode='json', by_alias=False)
                 elif hasattr(response, 'to_dict'):
                     response_data = response.to_dict()
                 elif hasattr(response, '__dict__'):
