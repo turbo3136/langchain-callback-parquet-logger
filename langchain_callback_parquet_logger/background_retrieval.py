@@ -34,7 +34,7 @@ _PENDING_STATUSES = {"in_progress", "queued", "processing"}
 
 async def retrieve_background_responses(
     df: "pd.DataFrame",
-    openai_client,
+    openai_client=None,
     logger: Optional[ParquetLogger] = None,
     response_id_col: str = "response_id",
     custom_id_col: str = "custom_id",
@@ -92,6 +92,11 @@ async def retrieve_background_responses(
     """
     if pd is None:
         raise ImportError("pandas is required for background retrieval. Install with: pip install pandas")
+
+    if openai_client is None:
+        if openai is None:
+            raise ImportError("openai is required for background retrieval. Install with: pip install openai")
+        openai_client = openai.AsyncOpenAI()
 
     # Suppress Pydantic serialization warnings globally
     warnings.filterwarnings("ignore", category=UserWarning, module=r"^pydantic")

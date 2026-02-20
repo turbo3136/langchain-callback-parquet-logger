@@ -318,7 +318,7 @@ async def batch_process(
 
 async def retrieve_batch_responses(
     df: pd.DataFrame,
-    openai_client,
+    openai_client=None,
     job_config: Optional[JobConfig] = None,
     storage_config: Optional[StorageConfig] = None,
     retrieval_config: Optional[RetrievalConfig] = None,
@@ -335,7 +335,8 @@ async def retrieve_batch_responses(
 
     Args:
         df: DataFrame with response IDs (and optionally custom IDs) to retrieve
-        openai_client: Initialized OpenAI async client (e.g. ``AsyncOpenAI()``)
+        openai_client: OpenAI async client. If None, creates ``AsyncOpenAI()`` automatically
+            using ``OPENAI_API_KEY`` from the environment (same behaviour as LangChain's ChatOpenAI).
         job_config: Job metadata — use the same values as the original batch_process() call
         storage_config: Storage paths — use the same values as the original batch_process() call
         retrieval_config: Polling and execution settings (poll_interval, max_poll_attempts, etc.)
