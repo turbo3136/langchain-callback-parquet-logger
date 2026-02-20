@@ -8,7 +8,7 @@ import atexit
 import warnings
 from pathlib import Path
 from datetime import datetime, date, timezone
-from typing import Dict, Any, List, Optional, Literal, Set, Sequence
+from typing import Dict, Any, List, Optional, Literal, Set, Sequence, Union
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -39,7 +39,7 @@ class ParquetLogger(BaseCallbackHandler):
         log_dir: str = "./llm_logs",
         buffer_size: int = 100,
         logger_metadata: Optional[Dict[str, Any]] = None,
-        partition_on: Optional[Literal["date"]] = "date",
+        partition_on: Optional[Union[Literal["date", "event_type"], List[Literal["date", "event_type"]]]] = "date",
         event_types: Optional[List[str]] = None,
         s3_config: Optional[S3Config] = None
     ):
@@ -50,7 +50,9 @@ class ParquetLogger(BaseCallbackHandler):
             log_dir: Directory to save log files
             buffer_size: Number of entries to buffer before flushing to disk
             logger_metadata: Optional metadata to include with all log entries
-            partition_on: Partitioning strategy - "date" or None
+            partition_on: Partitioning strategy. A key or ordered list of keys.
+                Valid keys: "date", "event_type". None for flat structure.
+                Examples: "date" (default), ["date", "event_type"], ["event_type"]
             event_types: List of event types to log (defaults to LLM events only)
             s3_config: Optional S3 configuration for uploading logs
         """
@@ -485,38 +487,64 @@ class ParquetLogger(BaseCallbackHandler):
             except Exception:
                 pass  # keep the writer alive
 
-    def _write_buffer(self, buffer):
-        """Write buffer to Parquet file (called without lock held)."""
+    def _normalize_partitions(self) -> List[str]:
+        """Return partition_on as an ordered list of partition keys."""
+        if self.partition_on is None:
+            return []
+        if isinstance(self.partition_on, str):
+            return [self.partition_on]
+        return list(self.partition_on)
+
+    def _build_table(self, entries: list) -> pa.Table:
+        """Build a PyArrow table from a list of entry dicts."""
+        ts = pa.array([e["timestamp"] for e in entries], type=pa.timestamp("us", tz="UTC"))
+        run_id = pa.array([e["run_id"] for e in entries], type=pa.string())
+        parent_run_id = pa.array([e.get("parent_run_id", "") for e in entries], type=pa.string())
+        custom_id = pa.array([e["custom_id"] for e in entries], type=pa.string())
+        event_type_col = pa.array([e["event_type"] for e in entries], type=pa.string())
+        logger_metadata = pa.array([e["logger_metadata"] for e in entries], type=pa.string())
+        payload = pa.array([e["payload"] for e in entries], type=pa.string())
+        return pa.Table.from_arrays(
+            [ts, run_id, parent_run_id, custom_id, event_type_col, logger_metadata, payload],
+            schema=SCHEMA,
+        )
+
+    def _write_buffer(self, buffer: list) -> None:
+        """Write buffer to Parquet file(s) (called without lock held)."""
+        if not buffer:
+            return
         try:
-            # Build columns explicitly
-            ts = pa.array([e["timestamp"] for e in buffer],
-                          type=pa.timestamp("us", tz="UTC"))
-            run_id = pa.array([e["run_id"] for e in buffer], type=pa.string())
-            parent_run_id = pa.array([e.get("parent_run_id", "") for e in buffer],
-                                    type=pa.string())
-            custom_id = pa.array([e["custom_id"] for e in buffer],
-                               type=pa.string())
-            event_type = pa.array([e["event_type"] for e in buffer], type=pa.string())
-            logger_metadata = pa.array([e["logger_metadata"] for e in buffer],
-                                      type=pa.string())
-            payload = pa.array([e["payload"] for e in buffer], type=pa.string())
+            partitions = self._normalize_partitions()
 
-            # Create table with explicit schema
-            table = pa.Table.from_arrays(
-                [ts, run_id, parent_run_id, custom_id, event_type,
-                 logger_metadata, payload],
-                schema=SCHEMA
-            )
+            def get_partition_dir(entry: dict) -> Optional[Path]:
+                parts = []
+                for p in partitions:
+                    if p == "date":
+                        parts.append(f"date={date.today()}")
+                    elif p == "event_type":
+                        parts.append(f"event_type={entry.get('event_type', 'unknown')}")
+                if not parts:
+                    return None
+                result = Path(parts[0])
+                for part in parts[1:]:
+                    result = result / part
+                return result
 
-            # Determine relative path based on partitioning
-            if self.partition_on == "date":
-                today = date.today()
-                relative_path = Path(f"date={today}") / f"logs_{datetime.now().strftime('%H%M%S_%f')}.parquet"
-            else:
-                relative_path = Path(f"logs_{datetime.now().strftime('%H%M%S_%f')}.parquet")
+            # Group entries by their partition directory (preserves insertion order)
+            groups: Dict[str, list] = {}
+            for entry in buffer:
+                partition_dir = get_partition_dir(entry)
+                key = str(partition_dir) if partition_dir is not None else ""
+                if key not in groups:
+                    groups[key] = []
+                groups[key].append(entry)
 
-            # Write using storage backend
-            self.storage.write(table, relative_path)
+            timestamp_str = datetime.now().strftime("%H%M%S_%f")
+            for path_key, entries in groups.items():
+                filename = f"logs_{timestamp_str}.parquet"
+                relative_path = (Path(path_key) / filename) if path_key else Path(filename)
+                table = self._build_table(entries)
+                self.storage.write(table, relative_path)
 
         except RuntimeError:
             # Re-raise storage errors
