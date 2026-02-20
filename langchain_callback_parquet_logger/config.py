@@ -94,6 +94,31 @@ class ColumnConfig:
 
 
 @dataclass
+class RetrievalConfig:
+    """Configuration for retrieve_batch_responses() — polling OpenAI background responses.
+
+    Separates polling params (how long to wait for completion) from execution params
+    (concurrency, timeouts, logging).
+
+    Example:
+        config = RetrievalConfig(
+            poll_interval=30.0,     # check every 30 seconds
+            max_poll_attempts=40,   # give up after ~20 minutes
+            batch_size=50,          # 50 concurrent polls
+            checkpoint_file="./retrieval_checkpoint.parquet",
+        )
+    """
+    poll_interval: float = 30.0       # seconds between status checks when response is pending
+    max_poll_attempts: int = 40       # max polls per response before giving up (40 × 30s ≈ 20 min)
+    batch_size: int = 50              # number of concurrent requests
+    timeout: float = 30.0            # per-request HTTP timeout in seconds
+    max_retries: int = 3             # retries for transient errors (5xx, rate limits, timeouts)
+    show_progress: bool = True
+    return_results: bool = True
+    checkpoint_file: Optional[str] = None
+
+
+@dataclass
 class LLMConfig:
     """LLM configuration for batch processing.
 

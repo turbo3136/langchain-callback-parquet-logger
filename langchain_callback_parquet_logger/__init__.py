@@ -10,8 +10,9 @@ from .config import (
     ColumnConfig,
     LLMConfig,
     EventType,
+    RetrievalConfig,
 )
-from .batch import batch_run, batch_process
+from .batch import batch_run, batch_process, retrieve_batch_responses
 
 # Optional imports with better error messages
 try:
@@ -21,7 +22,7 @@ except ImportError:
     retrieve_background_responses = None
 
 
-__version__ = "3.1.2"
+__version__ = "3.2.0"
 
 __all__ = [
     # Core
@@ -31,6 +32,7 @@ __all__ = [
     # Batch processing
     'batch_run',
     'batch_process',
+    'retrieve_batch_responses',
 
     # Configurations
     'S3Config',
@@ -40,11 +42,12 @@ __all__ = [
     'ColumnConfig',
     'LLMConfig',
     'EventType',
+    'RetrievalConfig',
 
     # Version
     '__version__',
 ]
 
-# Add background retrieval if available
+# Add low-level background retrieval if available (requires openai)
 if retrieve_background_responses is not None:
     __all__.append('retrieve_background_responses')

@@ -172,6 +172,103 @@ class TestParquetLogger:
         subdirs = [d for d in Path(temp_log_dir).iterdir() if d.is_dir()]
         assert len(subdirs) == 0
     
+    def test_partition_event_type_only(self, temp_log_dir):
+        """Test event_type-only partitioning creates correct directories."""
+        logger = ParquetLogger(temp_log_dir, buffer_size=1, partition_on=["event_type"])
+
+        logger._add_entry({
+            'timestamp': pd.Timestamp.now('UTC'),
+            'run_id': 'run-1',
+            'custom_id': '',
+            'event_type': 'llm_start',
+            'parent_run_id': '',
+            'logger_metadata': '{}',
+            'payload': '{}'
+        })
+        logger.flush()
+
+        partition_dir = Path(temp_log_dir) / "event_type=llm_start"
+        assert partition_dir.exists()
+        files = list(partition_dir.glob("*.parquet"))
+        assert len(files) == 1
+
+    def test_partition_date_and_event_type(self, temp_log_dir):
+        """Test combined date+event_type partitioning creates nested directories."""
+        logger = ParquetLogger(temp_log_dir, buffer_size=1, partition_on=["date", "event_type"])
+
+        logger._add_entry({
+            'timestamp': pd.Timestamp.now('UTC'),
+            'run_id': 'run-1',
+            'custom_id': '',
+            'event_type': 'llm_end',
+            'parent_run_id': '',
+            'logger_metadata': '{}',
+            'payload': '{}'
+        })
+        logger.flush()
+
+        today = date.today()
+        nested_dir = Path(temp_log_dir) / f"date={today}" / "event_type=llm_end"
+        assert nested_dir.exists()
+        files = list(nested_dir.glob("*.parquet"))
+        assert len(files) == 1
+
+    def test_partition_event_type_splits_mixed_buffer(self, temp_log_dir):
+        """Test that a buffer with mixed event types is split into separate directories."""
+        logger = ParquetLogger(temp_log_dir, buffer_size=10, partition_on=["event_type"])
+
+        for event_type in ["llm_start", "llm_end", "llm_start"]:
+            logger._add_entry({
+                'timestamp': pd.Timestamp.now('UTC'),
+                'run_id': 'run-1',
+                'custom_id': '',
+                'event_type': event_type,
+                'parent_run_id': '',
+                'logger_metadata': '{}',
+                'payload': '{}'
+            })
+        logger.flush()
+
+        start_dir = Path(temp_log_dir) / "event_type=llm_start"
+        end_dir = Path(temp_log_dir) / "event_type=llm_end"
+        assert start_dir.exists(), "llm_start partition directory should exist"
+        assert end_dir.exists(), "llm_end partition directory should exist"
+
+        import pyarrow.parquet as pq
+        start_files = list(start_dir.glob("*.parquet"))
+        end_files = list(end_dir.glob("*.parquet"))
+        assert len(start_files) == 1
+        assert len(end_files) == 1
+
+        # Use ParquetFile.read() to avoid Hive-partition schema merge conflict
+        # (pq.read_table on a file inside event_type=X/ would try to merge
+        # the directory-derived dictionary column with the file's string column)
+        start_table = pq.ParquetFile(start_files[0]).read()
+        end_table = pq.ParquetFile(end_files[0]).read()
+        assert len(start_table) == 2
+        assert len(end_table) == 1
+
+    def test_partition_string_backward_compat(self, temp_log_dir):
+        """Test that partition_on='date' string still works (backward compatibility)."""
+        logger = ParquetLogger(temp_log_dir, buffer_size=1, partition_on="date")
+
+        logger._add_entry({
+            'timestamp': pd.Timestamp.now('UTC'),
+            'run_id': 'run-1',
+            'custom_id': '',
+            'event_type': 'llm_start',
+            'parent_run_id': '',
+            'logger_metadata': '{}',
+            'payload': '{}'
+        })
+        logger.flush()
+
+        today = date.today()
+        partition_dir = Path(temp_log_dir) / f"date={today}"
+        assert partition_dir.exists()
+        files = list(partition_dir.glob("*.parquet"))
+        assert len(files) == 1
+
     def test_logger_metadata(self, temp_log_dir):
         """Test logger metadata persists in logs."""
         metadata = {"env": "test", "version": "1.0"}
