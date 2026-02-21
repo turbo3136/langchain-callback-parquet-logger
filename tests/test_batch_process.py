@@ -892,3 +892,216 @@ class TestBatch:
             assert meta['batch_config']['job']['category'] == 'mycat'
             assert meta['batch_config']['job']['version'] == '2.0'
             assert 'retrieval_started_at' in meta
+
+    @pytest.mark.asyncio
+    async def test_run_captures_ids_from_structured_output_valueerror(self):
+        """Test that response IDs are captured even when with_structured_output() raises
+        ValueError for queued background responses (the ID is in the exception message)."""
+        from langchain_callback_parquet_logger.batch import _try_extract_id_from_exception
+
+        # Verify the helper itself works on the expected ValueError format
+        fake_exc = ValueError(
+            "Structured Output response does not have a 'parsed' field nor a 'refusal' field. "
+            "Received message:\n\n"
+            "content=[] additional_kwargs={} response_metadata={'id': 'resp_abc123', "
+            "'status': 'queued', 'model': 'gpt-5'} id='resp_abc123'"
+        )
+        assert _try_extract_id_from_exception(fake_exc) == 'resp_abc123'
+
+        # Returns None for completed/failed statuses
+        completed_exc = ValueError(
+            "content=[] response_metadata={'id': 'resp_xyz', 'status': 'completed'} id='resp_xyz'"
+        )
+        assert _try_extract_id_from_exception(completed_exc) is None
+
+        # Returns None for unrelated exceptions
+        assert _try_extract_id_from_exception(RuntimeError("boom")) is None
+
+        # Now verify that run() captures IDs when all results are ValueErrors
+        df = pd.DataFrame({'prompt': ['a', 'b']})
+
+        class MockChatOpenAI:
+            def __init__(self, **kwargs):
+                self.callbacks = kwargs.get('callbacks', [])
+
+            def with_structured_output(self, schema):
+                call_count = 0
+
+                class StructuredWrapper:
+                    async def ainvoke(self_, input, config=None, **kwargs):
+                        nonlocal call_count
+                        call_count += 1
+                        rid = f'resp_bg{call_count:03d}'
+                        raise ValueError(
+                            f"Structured Output response does not have a 'parsed' field. "
+                            f"Received message:\n\ncontent=[] response_metadata={{'id': '{rid}', "
+                            f"'status': 'queued'}} id='{rid}'"
+                        )
+
+                return StructuredWrapper()
+
+        MockChatOpenAI.__name__ = 'ChatOpenAI'
+        MockChatOpenAI.__module__ = 'test_module'
+
+        from pydantic import BaseModel
+
+        class MySchema(BaseModel):
+            value: str
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch = Batch(
+                storage_config=StorageConfig(output_dir=tmpdir),
+                processing_config=ProcessingConfig(
+                    show_progress=False, return_results=True, return_exceptions=True
+                ),
+            )
+            import warnings as _w
+            with _w.catch_warnings():
+                _w.simplefilter("ignore", UserWarning)
+                await batch.run(
+                    df,
+                    LLMConfig(llm_class=MockChatOpenAI, llm_kwargs={}, structured_output=MySchema),
+                )
+
+        assert len(batch.pending_response_ids) == 2, (
+            "IDs should be extracted from ValueError exceptions thrown by with_structured_output()"
+        )
+        assert all(rid.startswith('resp_bg') for rid in batch.pending_response_ids)
+
+    @pytest.mark.asyncio
+    async def test_run_warns_when_structured_output_with_background_llm(self):
+        """Test that combining structured_output with a background-capable LLM emits a warning."""
+        import warnings as _w
+        from pydantic import BaseModel
+
+        class MySchema(BaseModel):
+            value: str
+
+        df = pd.DataFrame({'prompt': ['hello']})
+
+        class MockChatOpenAI:
+            def __init__(self, **kwargs):
+                self.callbacks = kwargs.get('callbacks', [])
+
+            def with_structured_output(self, schema):
+                class W:
+                    async def ainvoke(self_, input, config=None, **kwargs):
+                        raise ValueError(
+                            "Structured Output response does not have a 'parsed' field. "
+                            "Received message:\n\ncontent=[] response_metadata={'id': 'resp_warn1', "
+                            "'status': 'queued'} id='resp_warn1'"
+                        )
+                return W()
+
+        MockChatOpenAI.__name__ = 'ChatOpenAI'
+        MockChatOpenAI.__module__ = 'test_module'
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch = Batch(
+                storage_config=StorageConfig(output_dir=tmpdir),
+                processing_config=ProcessingConfig(
+                    show_progress=False, return_results=True, return_exceptions=True
+                ),
+            )
+            with pytest.warns(UserWarning, match="structured_output"):
+                await batch.run(
+                    df,
+                    LLMConfig(llm_class=MockChatOpenAI, llm_kwargs={}, structured_output=MySchema),
+                )
+
+    @pytest.mark.asyncio
+    async def test_run_and_retrieve_prints_when_no_ids_captured(self, capsys):
+        """Test that run_and_retrieve() prints an explanatory message when no background
+        IDs are captured (e.g. synchronous LLM), instead of silently returning None."""
+        df = pd.DataFrame({'prompt': ['hello']})
+        MockLLM = create_mock_llm_class()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch = Batch(
+                storage_config=StorageConfig(output_dir=tmpdir),
+                processing_config=ProcessingConfig(show_progress=True, return_results=True),
+            )
+            outcome = await batch.run_and_retrieve(
+                df, LLMConfig(llm_class=MockLLM, llm_kwargs={})
+            )
+
+        assert outcome.retrieval_results is None
+        captured = capsys.readouterr()
+        assert "No background response IDs captured" in captured.out
+        assert "retrieval skipped" in captured.out
+
+    @pytest.mark.asyncio
+    async def test_retrieve_adds_parsed_output_column(self):
+        """Test that retrieve() adds a parsed_output column when _last_structured_output
+        is set, using _parse_from_openai_response() to validate the JSON text."""
+        from pydantic import BaseModel
+        from langchain_callback_parquet_logger.batch import _parse_from_openai_response
+        from langchain_callback_parquet_logger import RetrievalConfig
+
+        class Location(BaseModel):
+            city: str
+            country: str
+
+        # Verify the parser helper directly
+        response_dict = {
+            'output': [
+                {
+                    'content': [
+                        {'type': 'output_text', 'text': '{"city": "Paris", "country": "France"}'}
+                    ]
+                }
+            ]
+        }
+        result = _parse_from_openai_response(response_dict, Location)
+        assert isinstance(result, Location)
+        assert result.city == 'Paris'
+        assert result.country == 'France'
+
+        # Also verify via output_text convenience key
+        response_dict2 = {'output_text': '{"city": "Berlin", "country": "Germany"}'}
+        result2 = _parse_from_openai_response(response_dict2, Location)
+        assert isinstance(result2, Location)
+        assert result2.city == 'Berlin'
+
+        # Returns None for bad input
+        assert _parse_from_openai_response({}, Location) is None
+        assert _parse_from_openai_response({'output': []}, Location) is None
+
+        # End-to-end: retrieve() applies the schema when _last_structured_output is set
+        fake_retrieval_df = pd.DataFrame([
+            {
+                'response_id': 'resp_001',
+                'status': 'completed',
+                'openai_response': {
+                    'output': [
+                        {'content': [{'type': 'output_text', 'text': '{"city": "Tokyo", "country": "Japan"}'}]}
+                    ]
+                },
+                'error': None,
+            }
+        ])
+
+        from unittest.mock import patch as _patch, AsyncMock as _AsyncMock
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch = Batch(
+                storage_config=StorageConfig(output_dir=tmpdir),
+                processing_config=ProcessingConfig(show_progress=False),
+            )
+            batch._background_response_ids = {'resp_001': 'cid_001'}
+            batch._last_structured_output = Location
+
+            with _patch(
+                'langchain_callback_parquet_logger.background_retrieval.retrieve_background_responses',
+                new=_AsyncMock(return_value=fake_retrieval_df),
+            ):
+                results = await batch.retrieve(
+                    retrieval_config=RetrievalConfig(show_progress=False, return_results=True)
+                )
+
+        assert results is not None
+        assert 'parsed_output' in results.columns
+        parsed = results['parsed_output'].iloc[0]
+        assert isinstance(parsed, Location)
+        assert parsed.city == 'Tokyo'
+        assert parsed.country == 'Japan'

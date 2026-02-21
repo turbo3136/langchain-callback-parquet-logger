@@ -2,11 +2,12 @@
 
 import asyncio
 import os
+import re
 import warnings
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Type, TYPE_CHECKING
 
 import pandas as pd
 from langchain_core.runnables import RunnableLambda
@@ -45,6 +46,54 @@ def _openai_response_id_extractor(result: Any, row: dict) -> Optional[str]:
     if meta.get('status') not in _OPENAI_PENDING_STATUSES:
         return None
     return meta.get('id')
+
+
+def _try_extract_id_from_exception(exc: BaseException) -> Optional[str]:
+    """Extract a pending background response ID from a structured-output ValueError.
+
+    When ``with_structured_output()`` wraps a background LLM, queued responses have
+    no content, causing LangChain to raise ValueError.  The stringified exception
+    contains the full response metadata (id + status), so we recover the ID via regex.
+    Returns None for any other exception type or non-pending status.
+    """
+    msg = str(exc)
+    id_match = re.search(r"\bid='(resp_[A-Za-z0-9]+)'", msg)
+    status_match = re.search(r"'status':\s*'([^']+)'", msg)
+    if id_match and status_match and status_match.group(1) in _OPENAI_PENDING_STATUSES:
+        return id_match.group(1)
+    return None
+
+
+def _parse_from_openai_response(response_dict: dict, schema: Type) -> Optional[Any]:
+    """Parse structured output from a serialized OpenAI Response dict.
+
+    ``retrieve_background_responses()`` stores the response as
+    ``model_dump(mode='json')``, so the JSON text for structured-output responses
+    lives at ``output[0].content[0].text`` (type == 'output_text').
+    Returns a validated Pydantic instance, or None on any failure.
+    """
+    if not response_dict or not isinstance(response_dict, dict):
+        return None
+    # Try convenience property first, then navigate the output array
+    text: Optional[str] = response_dict.get('output_text')
+    if not text:
+        for item in response_dict.get('output', []):
+            for content in item.get('content', []):
+                if content.get('type') == 'output_text':
+                    text = content.get('text')
+                    break
+            if text:
+                break
+    if not text:
+        return None
+    try:
+        return schema.model_validate_json(text)
+    except Exception:
+        import json as _json
+        try:
+            return schema(**_json.loads(text))
+        except Exception:
+            return None
 
 
 async def _batch_run(
@@ -260,6 +309,8 @@ class Batch:
 
         # Background response IDs captured during run() — response_id → custom_id
         self._background_response_ids: Dict[str, str] = {}
+        # Structured output schema from the last run() — applied during retrieve()
+        self._last_structured_output: Optional[Type] = None
 
     @property
     def pending_response_ids(self) -> Dict[str, str]:
@@ -333,6 +384,8 @@ class Batch:
         # silently overwrite the first batch's IDs; running a regular (non-background)
         # LLM after a background LLM would leave old IDs in place indefinitely.
         self._background_response_ids = {}
+        # Capture the structured output schema so retrieve() can parse responses.
+        self._last_structured_output = llm_config.structured_output
 
         # Suppress Pydantic serialization warnings globally
         warnings.filterwarnings("ignore", category=UserWarning, module=r"^pydantic")
@@ -382,13 +435,34 @@ class Batch:
             if response_id_extractor is None and llm_config.llm_class.__name__ in _OPENAI_BACKGROUND_CLASSES:
                 response_id_extractor = _openai_response_id_extractor
 
+            # Warn when structured_output + background LLM are combined — the parser
+            # cannot run until retrieval, so batch_results will contain ValueErrors.
+            if (llm_config.structured_output
+                    and llm_config.llm_class.__name__ in _OPENAI_BACKGROUND_CLASSES):
+                warnings.warn(
+                    "structured_output is set with a background-capable LLM. "
+                    "Structured output parsing requires a completed response and cannot "
+                    "run until retrieval. batch_results will contain ValueError exceptions "
+                    "(normal for background mode) — retrieve() will apply the schema and "
+                    "return a parsed_output column.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
             if response_id_extractor and results:
                 rows = df.to_dict('records')
                 for result, row in zip(results, rows):
-                    if result is None or isinstance(result, (Exception, BaseException)):
-                        continue
                     try:
-                        response_id = response_id_extractor(result, row)
+                        if result is None:
+                            continue
+                        if isinstance(result, BaseException):
+                            # For background mode with structured_output, LangChain's
+                            # parser raises ValueError before we can read response_metadata.
+                            # The exception message contains the ID and status, so recover
+                            # the ID via regex rather than silently dropping it.
+                            response_id = _try_extract_id_from_exception(result)
+                        else:
+                            response_id = response_id_extractor(result, row)
                         if response_id:
                             custom_id = row.get(self.column_config.custom_id, '')
                             self._background_response_ids[response_id] = custom_id
@@ -493,6 +567,19 @@ class Batch:
                 column_config=self.column_config,
             )
 
+        # Apply structured output schema if one was saved during run().
+        # Adds a parsed_output column so callers get Pydantic instances directly,
+        # mirroring what with_structured_output() would have returned synchronously.
+        if (rc.return_results
+                and results is not None
+                and not results.empty
+                and self._last_structured_output is not None):
+            schema = self._last_structured_output
+            results = results.copy()
+            results['parsed_output'] = results['openai_response'].apply(
+                lambda r: _parse_from_openai_response(r, schema) if isinstance(r, dict) else None
+            )
+
         if rc.show_progress:
             self._print_end("Retrieval")
 
@@ -531,6 +618,13 @@ class Batch:
         )
         # If run() captured no background IDs (e.g. synchronous LLM), skip retrieve
         if not self._background_response_ids:
+            if self.processing_config.show_progress:
+                print(
+                    "⚠️  No background response IDs captured — retrieval skipped.\n"
+                    "   If you expected background responses, verify:\n"
+                    "   - The model is configured for background mode (e.g. service_tier='flex')\n"
+                    "   - ProcessingConfig(return_exceptions=True) so pending results are returned"
+                )
             return BatchOutcome(batch_results=batch_results, retrieval_results=None)
         retrieval_results = await self.retrieve(
             openai_client=openai_client,
