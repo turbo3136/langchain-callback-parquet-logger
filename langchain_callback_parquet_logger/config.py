@@ -102,8 +102,13 @@ class RetrievalConfig:
     Separates polling params (how long to wait for completion) from execution params
     (concurrency, timeouts, logging).
 
-    The ``source`` field controls where the retriever looks for pending responses
-    when auto-discovering from storage (i.e. when no explicit DataFrame is supplied).
+    The ``source`` field controls where the retriever looks for pending responses:
+
+    - ``"memory"`` (default): only use response IDs captured in-memory during ``run()``;
+      never touches the file system or S3.  Returns empty when no IDs are available.
+    - ``"local"``: auto-discover pending responses from local Parquet files.
+    - ``"s3"``: auto-discover pending responses from S3.
+
     It only affects the *read* side — new retrieval events are always written to the
     full configured storage regardless of this setting.
 
@@ -115,7 +120,7 @@ class RetrievalConfig:
             batch_size=50,          # 50 concurrent polls
         )
     """
-    source: Literal["local", "s3"] = "local"  # where to read pending responses from
+    source: Literal["memory", "local", "s3"] = "memory"  # where to read pending responses from
     poll_interval: float = 30.0       # seconds between status checks when response is pending
     max_poll_attempts: int = 40       # max polls per response before giving up (40 × 30s ≈ 20 min)
     batch_size: int = 50              # number of concurrent requests

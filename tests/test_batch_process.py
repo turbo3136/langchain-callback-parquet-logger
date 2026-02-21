@@ -476,7 +476,9 @@ class TestBatch:
 
     @pytest.mark.asyncio
     async def test_batch_run_and_retrieve_structure(self, sample_dataframe):
-        """Test run_and_retrieve() returns a BatchOutcome with both result attributes."""
+        """Test run_and_retrieve() with a synchronous LLM: returns BatchOutcome with
+        batch_results populated and retrieval_results=None (no background IDs captured,
+        so retrieve() is skipped)."""
         df = sample_dataframe.copy()
         df['prompt'] = df['text']
 
@@ -487,7 +489,6 @@ class TestBatch:
                 storage_config=StorageConfig(output_dir=tmpdir),
                 processing_config=ProcessingConfig(show_progress=False, return_results=True),
             )
-            # Patch retrieve() to avoid needing a real OpenAI client
             batch.retrieve = AsyncMock(return_value=pd.DataFrame())
 
             outcome = await batch.run_and_retrieve(
@@ -497,18 +498,14 @@ class TestBatch:
 
             assert isinstance(outcome, BatchOutcome)
             assert outcome.batch_results is not None
-            assert outcome.retrieval_results is not None
-            batch.retrieve.assert_awaited_once()
+            # Synchronous LLM — no background IDs captured, retrieve() must be skipped
+            assert outcome.retrieval_results is None
+            batch.retrieve.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_retrieval_config_in_constructor(self, sample_dataframe):
-        """Test that RetrievalConfig stored in constructor is used as default in retrieve()."""
+        """Test that RetrievalConfig stored in constructor is accessible and used as default."""
         from langchain_callback_parquet_logger import RetrievalConfig
-
-        df = sample_dataframe.copy()
-        df['prompt'] = df['text']
-
-        MockLLM = create_mock_llm_class()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             rc = RetrievalConfig(poll_interval=99.0, max_poll_attempts=7, show_progress=False)
@@ -523,22 +520,11 @@ class TestBatch:
             assert batch.retrieval_config.poll_interval == 99.0
             assert batch.retrieval_config.max_poll_attempts == 7
 
-            # When retrieve() is called without explicit retrieval_config, it uses self.retrieval_config
-            captured_rc = {}
-            original_retrieve = batch.retrieve
-
-            async def spy_retrieve(openai_client=None, retrieval_config=None):
-                captured_rc['used'] = retrieval_config or batch.retrieval_config
-                return pd.DataFrame()
-
-            batch.retrieve = spy_retrieve
-            await batch.run_and_retrieve(
-                df,
-                llm_config=LLMConfig(llm_class=MockLLM, llm_kwargs={}),
-            )
-
-            assert captured_rc['used'].poll_interval == 99.0
-            assert captured_rc['used'].max_poll_attempts == 7
+            # Calling retrieve() without args uses self.retrieval_config (source='memory' default)
+            # — returns empty DataFrame immediately without touching storage or needing a client
+            result = await batch.retrieve()
+            assert isinstance(result, pd.DataFrame)
+            assert len(result) == 0
 
     @pytest.mark.asyncio
     async def test_openai_extractor_auto_applied(self, sample_dataframe):
@@ -604,3 +590,71 @@ class TestBatch:
 
             # Synchronous results should NOT be captured for retrieval
             assert len(batch.pending_response_ids) == 0
+
+    @pytest.mark.asyncio
+    async def test_run_and_retrieve_calls_retrieve_when_ids_captured(self, sample_dataframe):
+        """Test that run_and_retrieve() calls retrieve() when background IDs are captured."""
+        from langchain_callback_parquet_logger import RetrievalConfig
+
+        df = sample_dataframe.copy()
+        df['prompt'] = df['text']
+
+        call_count = 0
+
+        async def mock_ainvoke(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return Mock(
+                response_metadata={'id': f'resp_{call_count:03d}', 'status': 'in_progress'},
+                content='',
+            )
+
+        class MockChatOpenAI:
+            def __init__(self, **kwargs):
+                self.callbacks = kwargs.get('callbacks', [])
+                self.ainvoke = AsyncMock(side_effect=mock_ainvoke)
+
+        MockChatOpenAI.__name__ = 'ChatOpenAI'
+        MockChatOpenAI.__module__ = 'test_module'
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch = Batch(
+                storage_config=StorageConfig(output_dir=tmpdir),
+                processing_config=ProcessingConfig(show_progress=False, return_results=True),
+            )
+            # Patch retrieve() so we don't need a real OpenAI client
+            batch.retrieve = AsyncMock(return_value=pd.DataFrame({'response_id': ['resp_001']}))
+
+            outcome = await batch.run_and_retrieve(
+                df,
+                llm_config=LLMConfig(llm_class=MockChatOpenAI, llm_kwargs={}),
+            )
+
+            # Background IDs were captured — retrieve() should have been called
+            assert isinstance(outcome, BatchOutcome)
+            assert outcome.batch_results is not None
+            assert outcome.retrieval_results is not None
+            batch.retrieve.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_retrieve_source_memory_returns_empty(self):
+        """Test that retrieve() with source='memory' returns empty DataFrame
+        immediately without touching storage when no in-memory IDs are available."""
+        from langchain_callback_parquet_logger import RetrievalConfig
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch = Batch(
+                storage_config=StorageConfig(output_dir=tmpdir),
+                processing_config=ProcessingConfig(show_progress=False),
+            )
+            # No run() called — _background_response_ids is empty
+            # source='memory' (default) should return empty without reading any files
+            result = await batch.retrieve(
+                retrieval_config=RetrievalConfig(source='memory', return_results=True)
+            )
+            assert isinstance(result, pd.DataFrame)
+            assert len(result) == 0
+
+            # Verify no Parquet files were created (no storage access)
+            parquet_files = list(Path(tmpdir).glob('**/*.parquet'))
+            assert len(parquet_files) == 0

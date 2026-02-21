@@ -420,6 +420,9 @@ class Batch:
             ])
             count_desc = f"{len(df)} captured response(s)"
         else:
+            # 'memory' source means use only in-memory IDs — skip storage discovery
+            if rc.source == 'memory':
+                return pd.DataFrame() if rc.return_results else None
             # Auto-discover from Parquet files using this batch's storage
             if rc.source == "s3" and self.resolved_s3_config:
                 read_storage = S3Storage(self.resolved_s3_config)
@@ -485,6 +488,9 @@ class Batch:
         batch_results = await self.run(
             df, llm_config, response_id_extractor=response_id_extractor
         )
+        # If run() captured no background IDs (e.g. synchronous LLM), skip retrieve
+        if not self._background_response_ids:
+            return BatchOutcome(batch_results=batch_results, retrieval_results=None)
         retrieval_results = await self.retrieve(
             openai_client=openai_client,
             retrieval_config=retrieval_config or self.retrieval_config,
