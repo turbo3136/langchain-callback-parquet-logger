@@ -26,6 +26,27 @@ class BatchOutcome:
     retrieval_results: Optional[pd.DataFrame]
 
 
+# LLM class names known to support OpenAI's Responses API in background mode
+_OPENAI_BACKGROUND_CLASSES = frozenset({'ChatOpenAI', 'AzureChatOpenAI'})
+# Statuses indicating a response is still in-flight (not yet completed/failed)
+_OPENAI_PENDING_STATUSES = frozenset({'in_progress', 'queued', 'processing'})
+
+
+def _openai_response_id_extractor(result: Any, row: dict) -> Optional[str]:
+    """Extract background response ID from a LangChain OpenAI result.
+
+    Returns the response ID only when ``response_metadata['status']`` is a pending
+    status (background mode). Returns None for synchronous completions so they are
+    not inadvertently queued for retrieval polling.
+    """
+    meta = getattr(result, 'response_metadata', None)
+    if not isinstance(meta, dict):
+        return None
+    if meta.get('status') not in _OPENAI_PENDING_STATUSES:
+        return None
+    return meta.get('id')
+
+
 async def _batch_run(
     df: pd.DataFrame,
     llm: Any,
@@ -223,11 +244,13 @@ class Batch:
         storage_config: Optional[StorageConfig] = None,
         processing_config: Optional[ProcessingConfig] = None,
         column_config: Optional[ColumnConfig] = None,
+        retrieval_config: Optional[RetrievalConfig] = None,
     ):
         self.job_config = job_config or JobConfig()
         self.storage_config = storage_config or StorageConfig()
         self.processing_config = processing_config or ProcessingConfig()
         self.column_config = column_config or ColumnConfig()
+        self.retrieval_config = retrieval_config or RetrievalConfig()
 
         # Resolve storage paths once — shared by run() and retrieve()
         self.local_path, self.resolved_s3_config = _build_storage_paths(
@@ -337,6 +360,10 @@ class Batch:
                 row_timeout=self.processing_config.row_timeout,
             )
 
+        # Auto-detect extractor for known background-capable OpenAI LLM classes
+        if response_id_extractor is None and llm_config.llm_class.__name__ in _OPENAI_BACKGROUND_CLASSES:
+            response_id_extractor = _openai_response_id_extractor
+
         # Capture background response IDs from results
         if response_id_extractor and results:
             self._background_response_ids = {}
@@ -380,7 +407,7 @@ class Batch:
         from .background_retrieval import retrieve_background_responses, _query_pending_responses
         from .storage import LocalStorage, S3Storage
 
-        rc = retrieval_config or RetrievalConfig()
+        rc = retrieval_config or self.retrieval_config
 
         # Build df from in-memory captured IDs, or auto-discover from storage
         if self._background_response_ids:
@@ -459,7 +486,8 @@ class Batch:
             df, llm_config, response_id_extractor=response_id_extractor
         )
         retrieval_results = await self.retrieve(
-            openai_client=openai_client, retrieval_config=retrieval_config
+            openai_client=openai_client,
+            retrieval_config=retrieval_config or self.retrieval_config,
         )
         return BatchOutcome(
             batch_results=batch_results,

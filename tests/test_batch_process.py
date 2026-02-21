@@ -499,3 +499,108 @@ class TestBatch:
             assert outcome.batch_results is not None
             assert outcome.retrieval_results is not None
             batch.retrieve.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_retrieval_config_in_constructor(self, sample_dataframe):
+        """Test that RetrievalConfig stored in constructor is used as default in retrieve()."""
+        from langchain_callback_parquet_logger import RetrievalConfig
+
+        df = sample_dataframe.copy()
+        df['prompt'] = df['text']
+
+        MockLLM = create_mock_llm_class()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rc = RetrievalConfig(poll_interval=99.0, max_poll_attempts=7, show_progress=False)
+            batch = Batch(
+                storage_config=StorageConfig(output_dir=tmpdir),
+                processing_config=ProcessingConfig(show_progress=False, return_results=True),
+                retrieval_config=rc,
+            )
+
+            # Verify it's stored
+            assert batch.retrieval_config is rc
+            assert batch.retrieval_config.poll_interval == 99.0
+            assert batch.retrieval_config.max_poll_attempts == 7
+
+            # When retrieve() is called without explicit retrieval_config, it uses self.retrieval_config
+            captured_rc = {}
+            original_retrieve = batch.retrieve
+
+            async def spy_retrieve(openai_client=None, retrieval_config=None):
+                captured_rc['used'] = retrieval_config or batch.retrieval_config
+                return pd.DataFrame()
+
+            batch.retrieve = spy_retrieve
+            await batch.run_and_retrieve(
+                df,
+                llm_config=LLMConfig(llm_class=MockLLM, llm_kwargs={}),
+            )
+
+            assert captured_rc['used'].poll_interval == 99.0
+            assert captured_rc['used'].max_poll_attempts == 7
+
+    @pytest.mark.asyncio
+    async def test_openai_extractor_auto_applied(self, sample_dataframe):
+        """Test that response_id_extractor is auto-detected for ChatOpenAI-named classes
+        when response_metadata contains a pending status."""
+        df = sample_dataframe.copy()
+        df['prompt'] = df['text']
+
+        call_count = 0
+
+        async def mock_ainvoke(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return Mock(
+                response_metadata={'id': f'resp_{call_count:03d}', 'status': 'in_progress'},
+                content='',
+            )
+
+        class MockChatOpenAI:
+            def __init__(self, **kwargs):
+                self.callbacks = kwargs.get('callbacks', [])
+                self.ainvoke = AsyncMock(side_effect=mock_ainvoke)
+
+        MockChatOpenAI.__name__ = 'ChatOpenAI'
+        MockChatOpenAI.__module__ = 'test_module'
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch = Batch(
+                storage_config=StorageConfig(output_dir=tmpdir),
+                processing_config=ProcessingConfig(show_progress=False, return_results=True),
+            )
+            # No response_id_extractor passed — should be auto-detected
+            await batch.run(df, LLMConfig(llm_class=MockChatOpenAI, llm_kwargs={}))
+
+            assert len(batch.pending_response_ids) == len(df)
+            for rid in batch.pending_response_ids:
+                assert rid.startswith('resp_')
+
+    @pytest.mark.asyncio
+    async def test_openai_extractor_skips_synchronous(self, sample_dataframe):
+        """Test that auto-detected extractor returns None for synchronous completions
+        (status 'completed'), so they are not queued for background retrieval."""
+        df = sample_dataframe.copy()
+        df['prompt'] = df['text']
+
+        class MockChatOpenAI:
+            def __init__(self, **kwargs):
+                self.callbacks = kwargs.get('callbacks', [])
+                self.ainvoke = AsyncMock(return_value=Mock(
+                    response_metadata={'id': 'chatcmpl_sync456', 'status': 'completed'},
+                    content='hello',
+                ))
+
+        MockChatOpenAI.__name__ = 'ChatOpenAI'
+        MockChatOpenAI.__module__ = 'test_module'
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch = Batch(
+                storage_config=StorageConfig(output_dir=tmpdir),
+                processing_config=ProcessingConfig(show_progress=False, return_results=True),
+            )
+            await batch.run(df, LLMConfig(llm_class=MockChatOpenAI, llm_kwargs={}))
+
+            # Synchronous results should NOT be captured for retrieval
+            assert len(batch.pending_response_ids) == 0
