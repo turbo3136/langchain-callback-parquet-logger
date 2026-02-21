@@ -110,6 +110,7 @@ async def retrieve_background_responses(
     job_config: Optional[JobConfig] = None,
     retrieval_config: Optional[RetrievalConfig] = None,
     column_config: Optional[ColumnConfig] = None,
+    response_parser=None,
 ) -> Optional["pd.DataFrame"]:
     """
     Retrieve background responses from OpenAI and log them to Parquet.
@@ -367,6 +368,13 @@ async def retrieve_background_responses(
                     return {'response_id': response_id, 'status': 'failed', 'openai_response': None, 'error': last_error}
                 return None
 
+            # Extract output_text BEFORE model_dump — it's a computed property on the
+            # OpenAI Response object that is not serialized by model_dump().
+            # Storing it at the top level lets _parse_from_openai_response() find it
+            # without navigating the nested output[].content[] array (which can have
+            # null content items for reasoning outputs).
+            output_text = getattr(response, 'output_text', None)
+
             # Serialize the response object
             if hasattr(response, 'model_dump'):
                 response_data = response.model_dump(mode='json', by_alias=False)
@@ -377,6 +385,10 @@ async def retrieve_background_responses(
             else:
                 response_data = {'response': str(response)}
 
+            # Store output_text at top level for easy access
+            if output_text:
+                response_data['output_text'] = output_text
+
             # Check the response status — prefer the serialized dict, fall back to
             # the attribute, then default to 'completed' for backward compatibility
             # (guards against mock objects or responses with no status field).
@@ -386,16 +398,25 @@ async def retrieve_background_responses(
             response_status = _s if isinstance(_s, str) and _s else 'completed'
 
             if response_status == 'completed':
+                # Apply structured output parser if provided (dict for Parquet serialization)
+                parsed_output = None
+                if response_parser is not None:
+                    try:
+                        parsed_output = response_parser(response_data)
+                    except Exception:
+                        pass
+
                 _log('background_retrieval_complete', {
                     'response_id': response_id,
                     'openai_response': response_data,
+                    'parsed_output': parsed_output,
                     'status': 'completed',
                     'retrieval_time': datetime.now(timezone.utc).isoformat(),
                     'poll_attempts': poll_attempt + 1,
                 })
                 processed_ids.add(response_id)
                 if rc.return_results:
-                    return {'response_id': response_id, 'status': 'completed', 'openai_response': response_data, 'error': None}
+                    return {'response_id': response_id, 'status': 'completed', 'openai_response': response_data, 'parsed_output': parsed_output, 'error': None}
                 return None
 
             elif response_status in _TERMINAL_STATUSES:

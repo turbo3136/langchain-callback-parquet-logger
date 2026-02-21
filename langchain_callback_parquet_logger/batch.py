@@ -17,7 +17,7 @@ from .config import (
     JobConfig, StorageConfig, ProcessingConfig, ColumnConfig,
     S3Config, EventType, LLMConfig, RetrievalConfig
 )
-from .tagging import with_tags
+from .tagging import with_tags, extract_custom_id
 
 
 @dataclass
@@ -78,7 +78,7 @@ def _parse_from_openai_response(response_dict: dict, schema: Type) -> Optional[A
     text: Optional[str] = response_dict.get('output_text')
     if not text:
         for item in response_dict.get('output', []):
-            for content in item.get('content', []):
+            for content in (item.get('content') or []):
                 if content.get('type') == 'output_text':
                     text = content.get('text')
                     break
@@ -464,7 +464,15 @@ class Batch:
                         else:
                             response_id = response_id_extractor(result, row)
                         if response_id:
-                            custom_id = row.get(self.column_config.custom_id, '')
+                            # Try direct column first; fall back to config tags
+                            # (with_tags(custom_id='x') encodes it as 'logger_custom_id:x'
+                            # in the tags list — the same extraction logger.py does for llm_end).
+                            custom_id = (
+                                str(row.get(self.column_config.custom_id) or '')
+                                or extract_custom_id(
+                                    (row.get(self.column_config.config) or {}).get('tags', [])
+                                )
+                            )
                             self._background_response_ids[response_id] = custom_id
                     except Exception as exc:
                         warnings.warn(
@@ -552,6 +560,19 @@ class Batch:
             **(self.job_config.metadata or {}),
         }
 
+        # Build a response_parser callable so that parsing happens *during* retrieval
+        # and parsed_output is included in the background_retrieval_complete Parquet log.
+        # Using a factory function (_make_parser) avoids the closure-captures-variable bug.
+        schema = self._last_structured_output
+        response_parser = None
+        if schema is not None:
+            def _make_parser(s):
+                def parser(response_dict: dict) -> Optional[dict]:
+                    result = _parse_from_openai_response(response_dict, s)
+                    return result.model_dump() if result is not None else None
+                return parser
+            response_parser = _make_parser(schema)
+
         with ParquetLogger(
             log_dir=str(self.local_path),
             buffer_size=1000,
@@ -565,19 +586,20 @@ class Batch:
                 logger=logger,
                 retrieval_config=rc,
                 column_config=self.column_config,
+                response_parser=response_parser,
             )
 
-        # Apply structured output schema if one was saved during run().
-        # Adds a parsed_output column so callers get Pydantic instances directly,
-        # mirroring what with_structured_output() would have returned synchronously.
+        # Convert dict parsed_output → Pydantic objects for caller convenience.
+        # retrieve_background_responses() stores parsed_output as a JSON-serializable dict
+        # (for Parquet logging); convert to a Pydantic instance here for the caller.
         if (rc.return_results
                 and results is not None
                 and not results.empty
-                and self._last_structured_output is not None):
-            schema = self._last_structured_output
+                and schema is not None
+                and 'parsed_output' in results.columns):
             results = results.copy()
-            results['parsed_output'] = results['openai_response'].apply(
-                lambda r: _parse_from_openai_response(r, schema) if isinstance(r, dict) else None
+            results['parsed_output'] = results['parsed_output'].apply(
+                lambda d: schema.model_validate(d) if isinstance(d, dict) else None
             )
 
         if rc.show_progress:

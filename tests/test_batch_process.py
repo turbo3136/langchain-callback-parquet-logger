@@ -1077,6 +1077,9 @@ class TestBatch:
                         {'content': [{'type': 'output_text', 'text': '{"city": "Tokyo", "country": "Japan"}'}]}
                     ]
                 },
+                # retrieve_background_responses() now returns parsed_output as a dict;
+                # Batch.retrieve() converts it to a Pydantic instance.
+                'parsed_output': {'city': 'Tokyo', 'country': 'Japan'},
                 'error': None,
             }
         ])
@@ -1105,3 +1108,142 @@ class TestBatch:
         assert isinstance(parsed, Location)
         assert parsed.city == 'Tokyo'
         assert parsed.country == 'Japan'
+
+
+def test_parse_from_openai_response_handles_null_content():
+    """Test that _parse_from_openai_response does not raise TypeError when reasoning
+    output items have content=None (explicitly null in the JSON, not a missing key)."""
+    from pydantic import BaseModel
+    from langchain_callback_parquet_logger.batch import _parse_from_openai_response
+
+    class City(BaseModel):
+        name: str
+
+    # Reasoning item has content=None; message item has the actual output_text.
+    # item.get('content', []) returns None when the key exists with null value —
+    # (item.get('content') or []) returns [] instead, avoiding the TypeError.
+    response_dict = {
+        'output': [
+            {'type': 'reasoning', 'content': None},
+            {
+                'type': 'message',
+                'content': [{'type': 'output_text', 'text': '{"name": "Rome"}'}],
+            },
+        ]
+    }
+    result = _parse_from_openai_response(response_dict, City)
+    assert isinstance(result, City)
+    assert result.name == 'Rome'
+
+    # A response with only a reasoning item (no output_text) should return None gracefully.
+    response_only_reasoning = {'output': [{'type': 'reasoning', 'content': None}]}
+    assert _parse_from_openai_response(response_only_reasoning, City) is None
+
+
+def test_extract_custom_id_from_row_uses_config_tags():
+    """Test that extract_custom_id correctly extracts the ID from the tags list
+    produced by with_tags(custom_id='x') — the same format that Batch.run() now uses."""
+    from langchain_callback_parquet_logger.tagging import extract_custom_id
+    from langchain_callback_parquet_logger import with_tags
+
+    config = with_tags(custom_id='abc')
+    tags = config.get('tags', [])
+    assert extract_custom_id(tags) == 'abc'
+
+    # Multiple tags — extract_custom_id should pick the right one
+    config2 = with_tags(custom_id='xyz')
+    tags2 = config2.get('tags', []) + ['some_other:tag']
+    assert extract_custom_id(tags2) == 'xyz'
+
+    # No custom_id tag → empty string
+    assert extract_custom_id(['other:tag', 'unrelated']) == ''
+    assert extract_custom_id([]) == ''
+
+
+@pytest.mark.asyncio
+async def test_run_captures_custom_id_from_config_tags():
+    """Test that Batch.run() populates custom_id from the config column tags when
+    there is no top-level custom_id column — mirrors what logger.py does for llm_end."""
+    call_count = 0
+
+    async def mock_ainvoke(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        return Mock(
+            response_metadata={'id': f'resp_cid{call_count:03d}', 'status': 'in_progress'},
+            content='',
+        )
+
+    class MockChatOpenAI:
+        def __init__(self, **kwargs):
+            self.callbacks = kwargs.get('callbacks', [])
+            self.ainvoke = AsyncMock(side_effect=mock_ainvoke)
+
+    MockChatOpenAI.__name__ = 'ChatOpenAI'
+    MockChatOpenAI.__module__ = 'test_module'
+
+    df = pd.DataFrame({
+        'prompt': ['hello', 'world'],
+        'config': [
+            with_tags(custom_id='user-001'),
+            with_tags(custom_id='user-002'),
+        ],
+    })
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        batch = Batch(
+            storage_config=StorageConfig(output_dir=tmpdir),
+            processing_config=ProcessingConfig(show_progress=False, return_results=True),
+        )
+        await batch.run(df, LLMConfig(llm_class=MockChatOpenAI, llm_kwargs={}))
+
+    # Both IDs should have been captured with the correct custom_id values
+    assert len(batch.pending_response_ids) == 2
+    custom_ids = set(batch.pending_response_ids.values())
+    assert custom_ids == {'user-001', 'user-002'}
+
+
+@pytest.mark.asyncio
+async def test_retrieve_background_responses_includes_parsed_output():
+    """Test that retrieve_background_responses() calls response_parser for completed
+    responses and includes parsed_output in the returned DataFrame."""
+    from langchain_callback_parquet_logger.background_retrieval import retrieve_background_responses
+    from langchain_callback_parquet_logger import RetrievalConfig, ColumnConfig
+
+    # A fake completed response object
+    class FakeResponse:
+        status = 'completed'
+        output_text = '{"city": "Paris"}'
+
+        def model_dump(self, **kwargs):
+            return {'status': 'completed', 'output_text': self.output_text}
+
+    mock_client = AsyncMock()
+    mock_client.responses.retrieve = AsyncMock(return_value=FakeResponse())
+
+    df = pd.DataFrame({
+        'response_id': ['resp_test001'],
+        'custom_id': ['cid_001'],
+    })
+
+    # response_parser returns a dict (as Batch.retrieve() would build it)
+    def response_parser(response_dict: dict):
+        return {'city': 'Paris'}
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        results = await retrieve_background_responses(
+            df=df,
+            openai_client=mock_client,
+            retrieval_config=RetrievalConfig(
+                show_progress=False,
+                return_results=True,
+                poll_interval=0,
+            ),
+            response_parser=response_parser,
+        )
+
+    assert results is not None
+    assert not results.empty
+    assert 'parsed_output' in results.columns
+    assert results['parsed_output'].iloc[0] == {'city': 'Paris'}
+    assert results['status'].iloc[0] == 'completed'
