@@ -744,3 +744,151 @@ class TestBatch:
                     LLMConfig(llm_class=MockLLM, llm_kwargs={}),
                     response_id_extractor=crashing_extractor,
                 )
+
+    @pytest.mark.asyncio
+    async def test_run_returns_results_by_default(self, sample_dataframe):
+        """Test that run() returns a list by default (return_results now defaults to True).
+        Before this fix the default was False, causing silent None returns."""
+        df = sample_dataframe.copy()
+        df['prompt'] = df['text']
+
+        MockLLM = create_mock_llm_class()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch = Batch(
+                storage_config=StorageConfig(output_dir=tmpdir),
+                # No return_results set — should default to True
+                processing_config=ProcessingConfig(show_progress=False),
+            )
+            result = await batch.run(df, LLMConfig(llm_class=MockLLM, llm_kwargs={}))
+
+            assert result is not None
+            assert isinstance(result, list)
+            assert len(result) == len(df)
+
+    @pytest.mark.asyncio
+    async def test_run_resets_ids_between_calls(self, sample_dataframe):
+        """Test that each run() call resets _background_response_ids so the second
+        call's IDs don't accumulate on top of the first call's IDs."""
+        df = sample_dataframe.copy()
+        df['prompt'] = df['text']
+
+        call_count = 0
+
+        async def mock_ainvoke(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return Mock(
+                response_metadata={'id': f'resp_{call_count:03d}', 'status': 'in_progress'},
+                content='',
+            )
+
+        class MockChatOpenAI:
+            def __init__(self, **kwargs):
+                self.callbacks = kwargs.get('callbacks', [])
+                self.ainvoke = AsyncMock(side_effect=mock_ainvoke)
+
+        MockChatOpenAI.__name__ = 'ChatOpenAI'
+        MockChatOpenAI.__module__ = 'test_module'
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch = Batch(
+                storage_config=StorageConfig(output_dir=tmpdir),
+                processing_config=ProcessingConfig(show_progress=False, return_results=True),
+            )
+            # First run
+            await batch.run(df, LLMConfig(llm_class=MockChatOpenAI, llm_kwargs={}))
+            first_ids = set(batch.pending_response_ids)
+
+            # Second run — IDs should be replaced entirely, not accumulated
+            await batch.run(df, LLMConfig(llm_class=MockChatOpenAI, llm_kwargs={}))
+            second_ids = set(batch.pending_response_ids)
+
+            assert len(second_ids) == len(df)
+            assert first_ids.isdisjoint(second_ids), (
+                "Second run should have replaced first run's IDs, not accumulated them"
+            )
+
+    @pytest.mark.asyncio
+    async def test_run_clears_ids_when_no_background_llm(self, sample_dataframe):
+        """Test that run() with a non-background LLM clears IDs from a prior run(),
+        preventing stale IDs from leaking into retrieve()."""
+        df = sample_dataframe.copy()
+        df['prompt'] = df['text']
+
+        call_count = 0
+
+        async def mock_ainvoke_bg(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return Mock(
+                response_metadata={'id': f'resp_{call_count:03d}', 'status': 'in_progress'},
+                content='',
+            )
+
+        class MockChatOpenAI:
+            def __init__(self, **kwargs):
+                self.callbacks = kwargs.get('callbacks', [])
+                self.ainvoke = AsyncMock(side_effect=mock_ainvoke_bg)
+
+        MockChatOpenAI.__name__ = 'ChatOpenAI'
+        MockChatOpenAI.__module__ = 'test_module'
+
+        MockLLM = create_mock_llm_class()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch = Batch(
+                storage_config=StorageConfig(output_dir=tmpdir),
+                processing_config=ProcessingConfig(show_progress=False, return_results=True),
+            )
+            # First run with background LLM — captures IDs
+            await batch.run(df, LLMConfig(llm_class=MockChatOpenAI, llm_kwargs={}))
+            assert len(batch.pending_response_ids) == len(df)
+
+            # Second run with a plain LLM — IDs should be cleared, not preserved
+            await batch.run(df, LLMConfig(llm_class=MockLLM, llm_kwargs={}))
+            assert len(batch.pending_response_ids) == 0, (
+                "run() with a non-background LLM should clear IDs from the previous run"
+            )
+
+    @pytest.mark.asyncio
+    async def test_retrieve_logger_has_job_metadata(self):
+        """Test that retrieve() creates its ParquetLogger with job metadata so that
+        retrieval events have the same batch context as run() events."""
+        from langchain_callback_parquet_logger import JobConfig, RetrievalConfig, ParquetLogger
+        from unittest.mock import patch as _patch, AsyncMock as _AsyncMock
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch = Batch(
+                job_config=JobConfig(category='mycat', version='2.0'),
+                storage_config=StorageConfig(output_dir=tmpdir),
+                processing_config=ProcessingConfig(show_progress=False),
+            )
+            # Inject a fake response ID to trigger the retrieval path
+            batch._background_response_ids = {'resp_001': 'cid_001'}
+
+            captured_metadata = []
+
+            # Subclass to capture what logger_metadata is passed
+            original_init = ParquetLogger.__init__
+
+            def capturing_init(self, *args, **kwargs):
+                captured_metadata.append(kwargs.get('logger_metadata'))
+                original_init(self, *args, **kwargs)
+
+            with _patch.object(ParquetLogger, '__init__', capturing_init):
+                with _patch(
+                    'langchain_callback_parquet_logger.background_retrieval.retrieve_background_responses',
+                    new=_AsyncMock(return_value=pd.DataFrame()),
+                ):
+                    await batch.retrieve(
+                        retrieval_config=RetrievalConfig(show_progress=False, return_results=True)
+                    )
+
+            assert len(captured_metadata) == 1
+            meta = captured_metadata[0]
+            assert meta is not None, "retrieve() must pass logger_metadata to ParquetLogger"
+            assert 'batch_config' in meta
+            assert meta['batch_config']['job']['category'] == 'mycat'
+            assert meta['batch_config']['job']['version'] == '2.0'
+            assert 'retrieval_started_at' in meta

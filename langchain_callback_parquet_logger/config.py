@@ -66,7 +66,7 @@ class ProcessingConfig:
     buffer_size: int = 1000
     show_progress: bool = True
     return_exceptions: bool = True
-    return_results: bool = False
+    return_results: bool = True
     event_types: Optional[List[str]] = None
     partition_on: Optional[Union[Literal["date", "event_type"], List[Literal["date", "event_type"]]]] = "date"
     row_timeout: Optional[float] = None  # Per-row timeout in seconds (None = no timeout)

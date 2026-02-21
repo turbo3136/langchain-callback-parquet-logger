@@ -477,44 +477,42 @@ class ParquetLogger(BaseCallbackHandler):
         )
 
     def _write_buffer(self, buffer: list) -> None:
-        """Write buffer to Parquet file(s) (called without lock held)."""
+        """Write buffer to Parquet file(s) (called without lock held).
+
+        Any exception raised here propagates to _writer_loop, which stores it in
+        _writer_errors so it surfaces at the next flush() call.  This covers both
+        S3 errors (RuntimeError from S3Storage with on_failure='error') and local
+        write failures (OSError, PermissionError, disk-full, etc.).
+        """
         if not buffer:
             return
-        try:
-            partitions = self._normalize_partitions()
 
-            def get_partition_dir(entry: dict) -> Optional[Path]:
-                parts = []
-                for p in partitions:
-                    if p == "date":
-                        parts.append(f"date={date.today()}")
-                    elif p == "event_type":
-                        parts.append(f"event_type={entry.get('event_type', 'unknown')}")
-                return Path(*parts) if parts else None
+        partitions = self._normalize_partitions()
 
-            # Group entries by their partition directory (preserves insertion order)
-            groups: Dict[str, list] = {}
-            for entry in buffer:
-                partition_dir = get_partition_dir(entry)
-                key = str(partition_dir) if partition_dir is not None else ""
-                if key not in groups:
-                    groups[key] = []
-                groups[key].append(entry)
+        def get_partition_dir(entry: dict) -> Optional[Path]:
+            parts = []
+            for p in partitions:
+                if p == "date":
+                    parts.append(f"date={date.today()}")
+                elif p == "event_type":
+                    parts.append(f"event_type={entry.get('event_type', 'unknown')}")
+            return Path(*parts) if parts else None
 
-            timestamp_str = datetime.now().strftime("%H%M%S_%f")
-            for path_key, entries in groups.items():
-                filename = f"logs_{timestamp_str}.parquet"
-                relative_path = (Path(path_key) / filename) if path_key else Path(filename)
-                table = self._build_table(entries)
-                self.storage.write(table, relative_path)
+        # Group entries by their partition directory (preserves insertion order)
+        groups: Dict[str, list] = {}
+        for entry in buffer:
+            partition_dir = get_partition_dir(entry)
+            key = str(partition_dir) if partition_dir is not None else ""
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(entry)
 
-        except RuntimeError:
-            # Re-raise storage errors
-            raise
-        except Exception as e:
-            import traceback
-            print(f"Failed to write logs: {e}")
-            print(f"Full traceback:\n{traceback.format_exc()}")
+        timestamp_str = datetime.now().strftime("%H%M%S_%f")
+        for path_key, entries in groups.items():
+            filename = f"logs_{timestamp_str}.parquet"
+            relative_path = (Path(path_key) / filename) if path_key else Path(filename)
+            table = self._build_table(entries)
+            self.storage.write(table, relative_path)
 
     # Context manager support
     def __enter__(self):

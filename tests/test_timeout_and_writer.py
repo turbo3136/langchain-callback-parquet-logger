@@ -374,3 +374,50 @@ class TestBackgroundWriter:
 
         files = list(Path(temp_log_dir).glob("**/*.parquet"))
         assert len(files) == 1
+
+    def test_non_runtime_error_surfaces_at_flush(self, temp_log_dir):
+        """Test that non-RuntimeError write failures (e.g. OSError) surface at flush()
+        rather than being silently swallowed.  Before the fix, only RuntimeError was
+        re-raised; other exceptions were printed to stdout and discarded."""
+        logger = ParquetLogger(temp_log_dir, buffer_size=100)
+
+        logger._add_entry({
+            'timestamp': pd.Timestamp.now('UTC'),
+            'run_id': 'run-1',
+            'custom_id': '',
+            'event_type': 'test',
+            'parent_run_id': '',
+            'logger_metadata': '{}',
+            'payload': '{}'
+        })
+
+        # Sabotage with a non-RuntimeError to verify it also surfaces
+        def failing_write(*args, **kwargs):
+            raise OSError("Disk full")
+        logger.storage.write = failing_write
+
+        with pytest.raises(OSError, match="Disk full"):
+            logger.flush()
+
+
+class TestCompositeStorage:
+    """Test CompositeStorage behaviour."""
+
+    def test_list_files_warns_on_backend_failure(self, temp_log_dir):
+        """Test that CompositeStorage.list_files() emits a warning when a backend
+        fails rather than silently returning incomplete results."""
+        from langchain_callback_parquet_logger.storage import CompositeStorage, LocalStorage
+        from unittest.mock import MagicMock
+
+        good_backend = LocalStorage(Path(temp_log_dir))
+
+        bad_backend = MagicMock(spec=LocalStorage)
+        bad_backend.list_files.side_effect = Exception("S3 connection failed")
+
+        composite = CompositeStorage([good_backend, bad_backend])
+
+        with pytest.warns(UserWarning, match="S3 connection failed"):
+            files = composite.list_files()
+
+        # Good backend results are still returned despite the bad backend failing
+        assert isinstance(files, list)

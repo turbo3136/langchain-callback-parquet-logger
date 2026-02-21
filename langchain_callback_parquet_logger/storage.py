@@ -1,6 +1,7 @@
 """Storage backends for Parquet files."""
 
 import time
+import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import List, Optional
@@ -132,7 +133,7 @@ class S3Storage(StorageBackend):
         try:
             self.client.head_object(Bucket=self.config.bucket, Key=s3_key)
             return True
-        except:
+        except Exception:
             return False
 
     def list_files(self) -> List[str]:
@@ -182,8 +183,11 @@ class CompositeStorage(StorageBackend):
                     if f not in seen:
                         seen.add(f)
                         result.append(f)
-            except Exception:
-                pass
+            except Exception as e:
+                warnings.warn(
+                    f"Failed to list files from a storage backend "
+                    f"({type(backend).__name__}): {e}"
+                )
         return result
 
     def read_table(self, filepath: Path) -> pa.Table:

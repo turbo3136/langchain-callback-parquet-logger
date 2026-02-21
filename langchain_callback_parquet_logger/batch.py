@@ -328,6 +328,12 @@ class Batch:
         Returns:
             List of results if processing_config.return_results=True, None otherwise.
         """
+        # Always reset at the start of each run() so stale IDs from a prior call can
+        # never leak into retrieve().  Calling run() twice with ChatOpenAI would
+        # silently overwrite the first batch's IDs; running a regular (non-background)
+        # LLM after a background LLM would leave old IDs in place indefinitely.
+        self._background_response_ids = {}
+
         # Suppress Pydantic serialization warnings globally
         warnings.filterwarnings("ignore", category=UserWarning, module=r"^pydantic")
 
@@ -369,28 +375,29 @@ class Batch:
                 row_timeout=self.processing_config.row_timeout,
             )
 
-        # Auto-detect extractor for known background-capable OpenAI LLM classes
-        if response_id_extractor is None and llm_config.llm_class.__name__ in _OPENAI_BACKGROUND_CLASSES:
-            response_id_extractor = _openai_response_id_extractor
+            # Auto-detect extractor for known background-capable OpenAI LLM classes.
+            # ID capture is intentionally inside the 'with' block so that
+            # _background_response_ids is populated even when flush() raises an S3 error
+            # on context exit — the LLM calls already succeeded, so the IDs are valid.
+            if response_id_extractor is None and llm_config.llm_class.__name__ in _OPENAI_BACKGROUND_CLASSES:
+                response_id_extractor = _openai_response_id_extractor
 
-        # Capture background response IDs from results
-        if response_id_extractor and results:
-            self._background_response_ids = {}
-            rows = df.to_dict('records')
-            for result, row in zip(results, rows):
-                if result is None or isinstance(result, (Exception, BaseException)):
-                    continue
-                try:
-                    response_id = response_id_extractor(result, row)
-                    if response_id:
-                        custom_id = row.get(self.column_config.custom_id, '')
-                        self._background_response_ids[response_id] = custom_id
-                except Exception as exc:
-                    warnings.warn(
-                        f"response_id_extractor raised {type(exc).__name__} for a row "
-                        f"and was skipped: {exc}",
-                        stacklevel=2,
-                    )
+            if response_id_extractor and results:
+                rows = df.to_dict('records')
+                for result, row in zip(results, rows):
+                    if result is None or isinstance(result, (Exception, BaseException)):
+                        continue
+                    try:
+                        response_id = response_id_extractor(result, row)
+                        if response_id:
+                            custom_id = row.get(self.column_config.custom_id, '')
+                            self._background_response_ids[response_id] = custom_id
+                    except Exception as exc:
+                        warnings.warn(
+                            f"response_id_extractor raised {type(exc).__name__} for a row "
+                            f"and was skipped: {exc}",
+                            stacklevel=2,
+                        )
 
         if self.processing_config.show_progress:
             self._print_end("Processing")
@@ -458,9 +465,23 @@ class Batch:
             if self.resolved_s3_config:
                 print(f"☁️  S3 upload: s3://{self.resolved_s3_config.bucket}/{self.resolved_s3_config.prefix}")
 
+        retrieval_metadata = {
+            'batch_config': {
+                'job': asdict(self.job_config),
+                'storage': {
+                    'output_dir': self.storage_config.output_dir,
+                    'path_template': self.storage_config.path_template,
+                    's3': asdict(self.resolved_s3_config) if self.resolved_s3_config else None,
+                },
+            },
+            'retrieval_started_at': datetime.now(timezone.utc).isoformat(),
+            **(self.job_config.metadata or {}),
+        }
+
         with ParquetLogger(
             log_dir=str(self.local_path),
             buffer_size=1000,
+            logger_metadata=retrieval_metadata,
             partition_on=self.processing_config.partition_on,
             s3_config=self.resolved_s3_config,
         ) as logger:
