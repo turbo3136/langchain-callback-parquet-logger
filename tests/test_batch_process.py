@@ -658,3 +658,89 @@ class TestBatch:
             # Verify no Parquet files were created (no storage access)
             parquet_files = list(Path(tmpdir).glob('**/*.parquet'))
             assert len(parquet_files) == 0
+
+    @pytest.mark.asyncio
+    async def test_run_captures_ids_when_return_results_false(self, sample_dataframe):
+        """Test that background response IDs are captured even when return_results=False.
+        run() should hold results in memory internally for ID extraction, then discard
+        them before returning to the caller."""
+        df = sample_dataframe.copy()
+        df['prompt'] = df['text']
+
+        call_count = 0
+
+        async def mock_ainvoke(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return Mock(
+                response_metadata={'id': f'resp_{call_count:03d}', 'status': 'in_progress'},
+                content='',
+            )
+
+        class MockChatOpenAI:
+            def __init__(self, **kwargs):
+                self.callbacks = kwargs.get('callbacks', [])
+                self.ainvoke = AsyncMock(side_effect=mock_ainvoke)
+
+        MockChatOpenAI.__name__ = 'ChatOpenAI'
+        MockChatOpenAI.__module__ = 'test_module'
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch = Batch(
+                storage_config=StorageConfig(output_dir=tmpdir),
+                # return_results=False (the default) — would silently break ID capture before fix
+                processing_config=ProcessingConfig(show_progress=False, return_results=False),
+            )
+            result = await batch.run(df, LLMConfig(llm_class=MockChatOpenAI, llm_kwargs={}))
+
+            # Caller gets None (respects return_results=False)
+            assert result is None
+            # But IDs were captured internally
+            assert len(batch.pending_response_ids) == len(df)
+            for rid in batch.pending_response_ids:
+                assert rid.startswith('resp_')
+
+    @pytest.mark.asyncio
+    async def test_retrieve_show_progress_false_suppresses_no_responses_print(self, capsys):
+        """Test that show_progress=False suppresses the 'No pending responses' message
+        when storage discovery finds nothing."""
+        from langchain_callback_parquet_logger import RetrievalConfig
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch = Batch(
+                storage_config=StorageConfig(output_dir=tmpdir),
+                processing_config=ProcessingConfig(show_progress=False),
+            )
+            # source='local' triggers storage discovery (which finds nothing)
+            await batch.retrieve(
+                retrieval_config=RetrievalConfig(source='local', return_results=True, show_progress=False)
+            )
+
+            captured = capsys.readouterr()
+            assert "No pending responses" not in captured.out
+
+    @pytest.mark.asyncio
+    async def test_extractor_exception_emits_warning(self, sample_dataframe):
+        """Test that a crashing response_id_extractor emits a warning rather than
+        silently swallowing the exception."""
+        import warnings as warnings_module
+
+        df = sample_dataframe.copy()
+        df['prompt'] = df['text']
+
+        MockLLM = create_mock_llm_class()
+
+        def crashing_extractor(result, row):
+            raise ValueError("Extractor exploded!")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch = Batch(
+                storage_config=StorageConfig(output_dir=tmpdir),
+                processing_config=ProcessingConfig(show_progress=False, return_results=True),
+            )
+            with pytest.warns(UserWarning, match="Extractor exploded"):
+                await batch.run(
+                    df,
+                    LLMConfig(llm_class=MockLLM, llm_kwargs={}),
+                    response_id_extractor=crashing_extractor,
+                )

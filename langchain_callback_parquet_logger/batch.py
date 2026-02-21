@@ -339,6 +339,15 @@ class Batch:
         if self.processing_config.show_progress:
             self._print_start("🚀 Starting processing of", len(df))
 
+        # If ID extraction will be needed, hold results in memory regardless of
+        # return_results — background results are small (just response_id objects)
+        # and this prevents a silent failure when return_results=False.
+        _will_extract_ids = (
+            response_id_extractor is not None or
+            llm_config.llm_class.__name__ in _OPENAI_BACKGROUND_CLASSES
+        )
+        _effective_return_results = self.processing_config.return_results or _will_extract_ids
+
         with ParquetLogger(
             log_dir=str(self.local_path),
             buffer_size=self.processing_config.buffer_size,
@@ -356,7 +365,7 @@ class Batch:
                 max_concurrency=self.processing_config.max_concurrency,
                 show_progress=self.processing_config.show_progress,
                 return_exceptions=self.processing_config.return_exceptions,
-                return_results=self.processing_config.return_results,
+                return_results=_effective_return_results,
                 row_timeout=self.processing_config.row_timeout,
             )
 
@@ -376,12 +385,19 @@ class Batch:
                     if response_id:
                         custom_id = row.get(self.column_config.custom_id, '')
                         self._background_response_ids[response_id] = custom_id
-                except Exception:
-                    pass
+                except Exception as exc:
+                    warnings.warn(
+                        f"response_id_extractor raised {type(exc).__name__} for a row "
+                        f"and was skipped: {exc}",
+                        stacklevel=2,
+                    )
 
         if self.processing_config.show_progress:
             self._print_end("Processing")
 
+        # Respect the original return_results setting for the caller
+        if not self.processing_config.return_results:
+            return None
         return results
 
     async def retrieve(
@@ -431,12 +447,16 @@ class Batch:
 
             df = _query_pending_responses(read_storage)
             if df.empty:
-                print("No pending responses found in storage.")
+                if rc.show_progress:
+                    print("No pending responses found in storage.")
                 return pd.DataFrame() if rc.return_results else None
             count_desc = f"{len(df)} auto-discovered response(s)"
 
         if rc.show_progress:
-            self._print_start(f"🔍 Retrieving {count_desc} —", 0)
+            print(f"🔍 Retrieving {count_desc}...")
+            print(f"📁 Local output: {self.local_path}")
+            if self.resolved_s3_config:
+                print(f"☁️  S3 upload: s3://{self.resolved_s3_config.bucket}/{self.resolved_s3_config.prefix}")
 
         with ParquetLogger(
             log_dir=str(self.local_path),
