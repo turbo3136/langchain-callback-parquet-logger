@@ -22,7 +22,7 @@ from langchain_callback_parquet_logger.background_retrieval import (
     _BACKGROUND_EVENT_TYPES,
     _TERMINAL_RETRIEVAL_EVENT_TYPES,
 )
-from langchain_callback_parquet_logger.config import StorageConfig, JobConfig
+from langchain_callback_parquet_logger.config import StorageConfig, JobConfig, RetrievalConfig
 from langchain_callback_parquet_logger.storage import LocalStorage
 from langchain_callback_parquet_logger.logger import SCHEMA
 
@@ -41,7 +41,7 @@ def sample_df():
 def mock_openai_client():
     """Create a mock OpenAI client."""
     client = AsyncMock()
-    
+
     # Mock successful response
     mock_response = MagicMock()
     mock_response.model_dump.return_value = {
@@ -52,7 +52,7 @@ def mock_openai_client():
         'choices': [{'message': {'content': 'Test response'}}],
         'usage': {'total_tokens': 100}
     }
-    
+
     client.responses.retrieve = AsyncMock(return_value=mock_response)
     return client
 
@@ -62,14 +62,14 @@ async def test_basic_retrieval(sample_df, mock_openai_client):
     """Test basic retrieval functionality."""
     with tempfile.TemporaryDirectory() as tmpdir:
         logger = ParquetLogger(log_dir=tmpdir, buffer_size=10)
-        
+
         results = await retrieve_background_responses(
             sample_df,
             mock_openai_client,
             logger=logger,
-            show_progress=False
+            retrieval_config=RetrievalConfig(show_progress=False),
         )
-        
+
         # Check results DataFrame
         assert results is not None
         assert len(results) == 3
@@ -77,10 +77,10 @@ async def test_basic_retrieval(sample_df, mock_openai_client):
         assert 'status' in results.columns
         assert 'openai_response' in results.columns
         assert all(results['status'] == 'completed')
-        
+
         # Verify API was called for each response
         assert mock_openai_client.responses.retrieve.call_count == 3
-        
+
         # Check logs were created
         logger.flush()
         log_files = list(Path(tmpdir).rglob('*.parquet'))
@@ -92,14 +92,14 @@ async def test_rate_limiting():
     """Test rate limiting with 429 errors."""
     import sys
     from unittest.mock import patch
-    
+
     df = pd.DataFrame({
         'response_id': ['resp_001'],
         'custom_id': ['user-001']
     })
-    
+
     client = AsyncMock()
-    
+
     # Test with proper openai.RateLimitError if available
     try:
         import openai
@@ -114,7 +114,7 @@ async def test_rate_limiting():
                 response=mock_response,
                 body={"error": {"message": "Rate limit exceeded"}}
             )
-            
+
             # Simulate rate limit error on first call, then success
             client.responses.retrieve = AsyncMock(
                 side_effect=[
@@ -122,23 +122,22 @@ async def test_rate_limiting():
                     MagicMock(model_dump=lambda **kwargs: {'id': 'resp_001', 'status': 'completed'})
                 ]
             )
-            
+
             with patch('asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
                 results = await retrieve_background_responses(
                     df,
                     client,
-                    max_retries=3,
-                    show_progress=False
+                    retrieval_config=RetrievalConfig(max_retries=3, show_progress=False),
                 )
-                
+
                 # Sleep should be called for RateLimitError
                 mock_sleep.assert_called()
                 assert results.iloc[0]['status'] == 'completed'
-                
+
     except (ImportError, AttributeError, TypeError):
         # If openai is not available, test with generic exception
         rate_limit_error = Exception("Server error")
-        
+
         # Simulate error on first call, then success
         client.responses.retrieve = AsyncMock(
             side_effect=[
@@ -146,14 +145,13 @@ async def test_rate_limiting():
                 MagicMock(model_dump=lambda **kwargs: {'id': 'resp_001', 'status': 'completed'})
             ]
         )
-        
+
         results = await retrieve_background_responses(
             df,
             client,
-            max_retries=3,
-            show_progress=False
+            retrieval_config=RetrievalConfig(max_retries=3, show_progress=False),
         )
-        
+
         # The generic exception won't be retried, so it should fail
         assert results.iloc[0]['status'] == 'failed'
 
@@ -163,27 +161,26 @@ async def test_checkpoint_resume(sample_df):
     """Test checkpoint save and resume functionality."""
     with tempfile.TemporaryDirectory() as tmpdir:
         checkpoint_file = f"{tmpdir}/checkpoint.parquet"
-        
+
         # Create a checkpoint with one processed ID
         save_checkpoint(checkpoint_file, [
             {'response_id': 'resp_001', 'processed': True, 'error': None}
         ])
-        
+
         client = AsyncMock()
         mock_response = MagicMock(model_dump=lambda **kwargs: {'id': 'resp', 'status': 'completed'})
         client.responses.retrieve = AsyncMock(return_value=mock_response)
-        
+
         # Run retrieval with checkpoint
         results = await retrieve_background_responses(
             sample_df,
             client,
-            checkpoint_file=checkpoint_file,
-            show_progress=False
+            retrieval_config=RetrievalConfig(checkpoint_file=checkpoint_file, show_progress=False),
         )
-        
+
         # Should only retrieve 2 responses (resp_002 and resp_003)
         assert client.responses.retrieve.call_count == 2
-        
+
         # First response should be marked as already processed
         resp_001_result = results[results['response_id'] == 'resp_001'].iloc[0]
         assert resp_001_result['status'] == 'already_processed'
@@ -194,23 +191,22 @@ async def test_memory_efficient_mode(sample_df, mock_openai_client):
     """Test return_results=False for memory efficiency."""
     with tempfile.TemporaryDirectory() as tmpdir:
         logger = ParquetLogger(log_dir=tmpdir, buffer_size=10)
-        
+
         results = await retrieve_background_responses(
             sample_df,
             mock_openai_client,
             logger=logger,
-            return_results=False,  # Don't keep results in memory
-            show_progress=False
+            retrieval_config=RetrievalConfig(return_results=False, show_progress=False),
         )
-        
+
         # Should return None
         assert results is None
-        
+
         # But logs should still be written
         logger.flush()
         log_files = list(Path(tmpdir).rglob('*.parquet'))
         assert len(log_files) > 0
-        
+
         # Verify all responses were retrieved
         assert mock_openai_client.responses.retrieve.call_count == 3
 
@@ -222,7 +218,7 @@ async def test_partial_failures(mock_openai_client):
         'response_id': ['resp_001', 'resp_002', 'resp_003'],
         'custom_id': ['user-001', 'user-002', 'user-003']
     })
-    
+
     # Mock mixed success/failure responses
     mock_openai_client.responses.retrieve = AsyncMock(
         side_effect=[
@@ -231,14 +227,13 @@ async def test_partial_failures(mock_openai_client):
             MagicMock(model_dump=lambda **kwargs: {'id': 'resp_003', 'status': 'completed'})
         ]
     )
-    
+
     results = await retrieve_background_responses(
         df,
         mock_openai_client,
-        max_retries=1,
-        show_progress=False
+        retrieval_config=RetrievalConfig(max_retries=1, show_progress=False),
     )
-    
+
     # Check mixed statuses
     assert len(results) == 3
     assert results.iloc[0]['status'] == 'completed'
@@ -254,31 +249,31 @@ async def test_missing_columns():
     df = pd.DataFrame({
         'response_id': ['resp_001']
     })
-    
+
     client = AsyncMock()
     client.responses.retrieve = AsyncMock(
         return_value=MagicMock(model_dump=lambda **kwargs: {'id': 'resp_001'})
     )
-    
+
     # Should work with warning
     with pytest.warns(UserWarning, match="custom_id"):
         results = await retrieve_background_responses(
             df,
             client,
-            show_progress=False
+            retrieval_config=RetrievalConfig(show_progress=False),
         )
-    
+
     assert results is not None
     assert len(results) == 1
-    
+
     # Missing response_id column should raise error
     df_bad = pd.DataFrame({'other_column': ['data']})
-    
+
     with pytest.raises(ValueError, match="response_id"):
         await retrieve_background_responses(
             df_bad,
             client,
-            show_progress=False
+            retrieval_config=RetrievalConfig(show_progress=False),
         )
 
 
@@ -289,23 +284,21 @@ async def test_timeout_handling():
         'response_id': ['resp_001'],
         'custom_id': ['user-001']
     })
-    
+
     client = AsyncMock()
-    
+
     # Create a coroutine that never completes (needs to accept response_id parameter)
     async def never_complete(response_id):
         await asyncio.sleep(100)
-    
+
     client.responses.retrieve = AsyncMock(side_effect=never_complete)
-    
+
     results = await retrieve_background_responses(
         df,
         client,
-        timeout=0.1,  # Very short timeout
-        max_retries=1,
-        show_progress=False
+        retrieval_config=RetrievalConfig(timeout=0.1, max_retries=1, show_progress=False),
     )
-    
+
     # Should fail with timeout
     assert results.iloc[0]['status'] == 'failed'
     assert 'Timeout' in results.iloc[0]['error']
@@ -319,23 +312,22 @@ async def test_batch_processing():
         'response_id': [f'resp_{i:03d}' for i in range(10)],
         'custom_id': [f'user_{i:03d}' for i in range(10)]
     })
-    
+
     client = AsyncMock()
     call_times = []
-    
+
     async def track_calls(response_id):
         call_times.append(asyncio.get_event_loop().time())
         return MagicMock(model_dump=lambda **kwargs: {'id': response_id})
-    
+
     client.responses.retrieve = AsyncMock(side_effect=track_calls)
-    
+
     await retrieve_background_responses(
         df,
         client,
-        batch_size=3,  # Process 3 at a time
-        show_progress=False
+        retrieval_config=RetrievalConfig(batch_size=3, show_progress=False),
     )
-    
+
     # All should be retrieved
     assert client.responses.retrieve.call_count == 10
 
@@ -347,26 +339,26 @@ async def test_logging_event_types():
         'response_id': ['resp_001'],
         'custom_id': ['user-001']
     })
-    
+
     with tempfile.TemporaryDirectory() as tmpdir:
         logger = ParquetLogger(log_dir=tmpdir, buffer_size=1)
-        
+
         client = AsyncMock()
         client.responses.retrieve = AsyncMock(
             return_value=MagicMock(model_dump=lambda **kwargs: {'id': 'resp_001'})
         )
-        
+
         await retrieve_background_responses(
             df,
             client,
             logger=logger,
-            show_progress=False
+            retrieval_config=RetrievalConfig(show_progress=False),
         )
-        
+
         # Read logs and check event types
         log_df = pd.read_parquet(tmpdir)
         event_types = log_df['event_type'].unique()
-        
+
         assert 'background_retrieval_attempt' in event_types
         assert 'background_retrieval_complete' in event_types
 
@@ -391,7 +383,7 @@ async def test_schema_consistency():
             df,
             client,
             logger=logger,
-            show_progress=False
+            retrieval_config=RetrievalConfig(show_progress=False),
         )
 
         log_df = pd.read_parquet(tmpdir)
@@ -427,7 +419,6 @@ async def test_auto_discovery_from_storage():
         #   resp_pending  → latest event is background_retrieval_attempt (non-terminal)
         #   resp_done     → latest event is background_retrieval_complete (terminal)
         logger = ParquetLogger(log_dir=tmpdir, buffer_size=10)
-        from datetime import timezone
 
         # Pending response: only an attempt event logged
         logger._add_entry({
@@ -488,12 +479,11 @@ async def test_auto_discovery_from_storage():
         )
 
         # Use path_template="" so the resolved path is exactly tmpdir
-        # (mirroring how batch_process + retrieve would share the same resolved path)
         storage_config = StorageConfig(output_dir=tmpdir, path_template="")
         results = await retrieve_background_responses(
             storage_config=storage_config,
             openai_client=client,
-            show_progress=False,
+            retrieval_config=RetrievalConfig(show_progress=False),
         )
 
         # Only the pending response should have been retrieved
@@ -512,7 +502,6 @@ async def test_auto_discovery_no_pending():
     """When all responses are terminal, auto-discovery returns empty without API calls."""
     with tempfile.TemporaryDirectory() as tmpdir:
         logger = ParquetLogger(log_dir=tmpdir, buffer_size=10)
-        from datetime import timezone
 
         # Write a completed response
         logger._add_entry({
@@ -539,7 +528,7 @@ async def test_auto_discovery_no_pending():
         results = await retrieve_background_responses(
             storage_config=storage_config,
             openai_client=client,
-            show_progress=False,
+            retrieval_config=RetrievalConfig(show_progress=False),
         )
 
         # No API calls should be made
@@ -559,7 +548,7 @@ async def test_auto_discovery_empty_storage():
         results = await retrieve_background_responses(
             storage_config=storage_config,
             openai_client=client,
-            show_progress=False,
+            retrieval_config=RetrievalConfig(show_progress=False),
         )
 
         assert client.responses.retrieve.call_count == 0
@@ -575,7 +564,7 @@ async def test_auto_discovery_requires_storage_config():
     with pytest.raises(ValueError, match="storage_config"):
         await retrieve_background_responses(
             openai_client=client,
-            show_progress=False,
+            retrieval_config=RetrievalConfig(show_progress=False),
         )
 
 
@@ -583,10 +572,7 @@ async def test_auto_discovery_requires_storage_config():
 async def test_source_local_uses_only_local_storage():
     """source='local' should read only from LocalStorage, not S3."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        from langchain_callback_parquet_logger.config import RetrievalConfig, S3Config
-
         logger = ParquetLogger(log_dir=tmpdir, buffer_size=10)
-        from datetime import timezone
 
         logger._add_entry({
             'timestamp': datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
@@ -613,13 +599,12 @@ async def test_source_local_uses_only_local_storage():
         )
 
         # source="local" (default) — should find the entry written locally
-        rc = RetrievalConfig(source="local")
+        rc = RetrievalConfig(source="local", show_progress=False)
         storage_config = StorageConfig(output_dir=tmpdir, path_template="")
         results = await retrieve_background_responses(
             storage_config=storage_config,
             retrieval_config=rc,
             openai_client=client,
-            show_progress=False,
         )
 
         assert client.responses.retrieve.call_count == 1
@@ -630,8 +615,6 @@ async def test_source_local_uses_only_local_storage():
 @pytest.mark.asyncio
 async def test_source_s3_requires_s3_config():
     """source='s3' without an s3_config should raise ValueError."""
-    from langchain_callback_parquet_logger.config import RetrievalConfig
-
     client = AsyncMock()
     # StorageConfig with no s3_config
     storage_config = StorageConfig(output_dir="/tmp/test", path_template="")
@@ -639,9 +622,8 @@ async def test_source_s3_requires_s3_config():
     with pytest.raises(ValueError, match="s3_config"):
         await retrieve_background_responses(
             storage_config=storage_config,
-            retrieval_config=RetrievalConfig(source="s3"),
+            retrieval_config=RetrievalConfig(source="s3", show_progress=False),
             openai_client=client,
-            show_progress=False,
         )
 
 

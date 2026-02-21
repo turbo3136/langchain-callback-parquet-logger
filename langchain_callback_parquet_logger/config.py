@@ -68,7 +68,7 @@ class ProcessingConfig:
     return_exceptions: bool = True
     return_results: bool = False
     event_types: Optional[List[str]] = None
-    partition_on: Optional[Literal["date"]] = "date"
+    partition_on: Optional[Union[Literal["date", "event_type"], List[Literal["date", "event_type"]]]] = "date"
     row_timeout: Optional[float] = None  # Per-row timeout in seconds (None = no timeout)
 
     def __post_init__(self):
@@ -91,6 +91,8 @@ class ColumnConfig:
     prompt: str = "prompt"
     config: str = "config"
     tools: Optional[str] = "tools"
+    response_id: str = "response_id"
+    custom_id: str = "custom_id"
 
 
 @dataclass

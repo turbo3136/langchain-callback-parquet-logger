@@ -6,7 +6,6 @@ with automatic logging to Parquet files, rate limiting, and checkpoint support.
 """
 
 import asyncio
-import json
 import random
 import time
 from datetime import datetime, timezone
@@ -25,7 +24,7 @@ except ImportError:
     openai = None
 
 from .logger import ParquetLogger
-from .config import StorageConfig, JobConfig, RetrievalConfig
+from .config import StorageConfig, JobConfig, RetrievalConfig, ColumnConfig
 from .storage import create_storage, LocalStorage, S3Storage
 
 # OpenAI response statuses that mean "done, stop polling"
@@ -110,16 +109,7 @@ async def retrieve_background_responses(
     storage_config: Optional[StorageConfig] = None,
     job_config: Optional[JobConfig] = None,
     retrieval_config: Optional[RetrievalConfig] = None,
-    response_id_col: str = "response_id",
-    custom_id_col: str = "custom_id",
-    batch_size: int = 50,
-    max_retries: int = 3,
-    timeout: float = 30.0,
-    poll_interval: float = 30.0,
-    max_poll_attempts: int = 40,
-    show_progress: bool = True,
-    checkpoint_file: Optional[str] = None,
-    return_results: bool = True,
+    column_config: Optional[ColumnConfig] = None,
 ) -> Optional["pd.DataFrame"]:
     """
     Retrieve background responses from OpenAI and log them to Parquet.
@@ -140,7 +130,8 @@ async def retrieve_background_responses(
         and retries only those.
 
     **Explicit mode** (pass a ``df`` directly):
-        Provide a DataFrame with ``response_id`` and ``custom_id`` columns, as before.
+        Provide a DataFrame with ``response_id`` and ``custom_id`` columns (or
+        the column names configured in ``column_config``).
 
     Args:
         df: Optional DataFrame containing response IDs to retrieve.  If omitted,
@@ -152,23 +143,17 @@ async def retrieve_background_responses(
         storage_config: StorageConfig used to locate existing log files for
             auto-discovery and to write new log entries.
         job_config: Optional JobConfig used to resolve the full storage path (same
-            object passed to ``batch_process()``).
-        retrieval_config: Optional RetrievalConfig controlling polling behavior and
-            the auto-discovery source (``source="local"`` or ``source="s3"``).
+            object passed to ``Batch``).
+        retrieval_config: Optional RetrievalConfig controlling all polling behavior
+            (poll_interval, max_poll_attempts, batch_size, timeout, max_retries,
+            show_progress, checkpoint_file, return_results, source).
             Defaults to ``RetrievalConfig()`` (local, conservative polling settings).
-        response_id_col: Column name containing response IDs (default: "response_id")
-        custom_id_col: Column name containing custom IDs (default: "custom_id")
-        batch_size: Number of concurrent requests (default: 50)
-        max_retries: Maximum retries per API call for transient errors (default: 3)
-        timeout: Timeout per individual API request in seconds (default: 30.0)
-        poll_interval: Seconds to wait between status checks (default: 30.0)
-        max_poll_attempts: Maximum polls per response before giving up (default: 40)
-        show_progress: Show progress bar (default: True)
-        checkpoint_file: Optional path to checkpoint file for resume capability
-        return_results: If False, don't keep results in memory (default: True)
+        column_config: Optional ColumnConfig specifying which DataFrame columns hold
+            the response_id and custom_id values.  Defaults to ``ColumnConfig()``
+            (columns named "response_id" and "custom_id").
 
     Returns:
-        DataFrame with retrieval results if return_results=True, else None.
+        DataFrame with retrieval results if rc.return_results=True, else None.
         Result columns: response_id, status, openai_response, error
 
     Example — auto-discovery::
@@ -203,8 +188,9 @@ async def retrieve_background_responses(
     # Suppress Pydantic serialization warnings globally
     warnings.filterwarnings("ignore", category=UserWarning, module=r"^pydantic")
 
-    # Resolve retrieval configuration (source, polling params, etc.)
+    # Resolve configuration objects
     rc = retrieval_config or RetrievalConfig()
+    cc = column_config or ColumnConfig()
 
     # --- Auto-discovery mode ---
     if df is None:
@@ -214,7 +200,7 @@ async def retrieve_background_responses(
                 "Pass a DataFrame with response IDs, or a StorageConfig to "
                 "auto-discover pending responses from existing log files."
             )
-        # Resolve storage path (reuse same logic as batch_process)
+        # Resolve storage path (reuse same logic as Batch)
         from .batch import _build_storage_paths
         local_path, resolved_s3_config = _build_storage_paths(
             job_config or JobConfig(), storage_config
@@ -233,10 +219,12 @@ async def retrieve_background_responses(
         df = _query_pending_responses(read_storage)
 
         if df.empty:
-            print("No pending responses found in storage.")
-            return pd.DataFrame() if return_results else None
+            if rc.show_progress:
+                print("No pending responses found in storage.")
+            return pd.DataFrame() if rc.return_results else None
 
-        print(f"Auto-discovered {len(df)} pending response(s) from storage.")
+        if rc.show_progress:
+            print(f"Auto-discovered {len(df)} pending response(s) from storage.")
 
         # Auto-create logger pointing at the same full path if not supplied
         # (always write to all configured backends, regardless of read source)
@@ -244,59 +232,50 @@ async def retrieve_background_responses(
             logger = ParquetLogger(log_dir=str(local_path), s3_config=resolved_s3_config)
 
     # --- Validate required columns ---
-    if response_id_col not in df.columns:
-        raise ValueError(f"Column '{response_id_col}' not found in DataFrame")
-    if custom_id_col not in df.columns:
-        warnings.warn(f"Column '{custom_id_col}' not found. Using empty string for custom IDs.")
+    if cc.response_id not in df.columns:
+        raise ValueError(f"Column '{cc.response_id}' not found in DataFrame")
+    if cc.custom_id not in df.columns:
+        warnings.warn(f"Column '{cc.custom_id}' not found. Using empty string for custom IDs.")
         df = df.copy()
-        df[custom_id_col] = ""
+        df[cc.custom_id] = ""
 
-    # Initialize progress tracking
-    progress_bar = None
-    if show_progress:
-        try:
-            from tqdm.auto import tqdm
-            progress_bar = tqdm(total=len(df), desc="Retrieving responses", position=0, leave=True)
-        except Exception:
-            print(f"Retrieving {len(df)} responses...")
+    # Initialize manual progress tracking
+    total_count = len(df)
+    progress_interval = 1 if total_count <= 20 else max(1, total_count // 10)
 
     # Load checkpoint if exists
     processed_ids = set()
     failed_ids = {}
-    if checkpoint_file and Path(checkpoint_file).exists():
+    if rc.checkpoint_file and Path(rc.checkpoint_file).exists():
         try:
-            checkpoint_df = pd.read_parquet(checkpoint_file)
+            checkpoint_df = pd.read_parquet(rc.checkpoint_file)
             processed_ids = set(checkpoint_df['response_id'].values)
             if 'error' in checkpoint_df.columns:
                 failed_ids = dict(zip(
                     checkpoint_df[checkpoint_df['error'].notna()]['response_id'],
                     checkpoint_df[checkpoint_df['error'].notna()]['error']
                 ))
-            if progress_bar:
-                progress_bar.update(len(processed_ids))
-            print(f"Resumed from checkpoint: {len(processed_ids)} already processed")
+            if rc.show_progress:
+                print(f"Resumed from checkpoint: {len(processed_ids)} already processed")
         except Exception as e:
             warnings.warn(f"Failed to load checkpoint: {e}")
 
     # Prepare results storage
-    results = [] if return_results else None
+    results = [] if rc.return_results else None
     checkpoint_batch = []
 
     # Rate limiting state (shared across concurrent tasks via nonlocal)
     rate_limit_reset = 0
-    rate_limit_remaining = batch_size
+    rate_limit_remaining = rc.batch_size
 
     async def retrieve_single(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Retrieve a single response: poll until terminal status, with error retries."""
-        response_id = row[response_id_col]
-        custom_id = row.get(custom_id_col, "")
+        response_id = row[cc.response_id]
+        custom_id = row.get(cc.custom_id, "")
 
         # Skip if already processed
         if response_id in processed_ids:
-            if progress_bar:
-                progress_bar.update(1)
-                progress_bar.refresh()
-            if return_results:
+            if rc.return_results:
                 return {
                     'response_id': response_id,
                     'status': 'already_processed',
@@ -308,15 +287,13 @@ async def retrieve_background_responses(
         def _log(event_type: str, data: dict):
             """Log a background retrieval event using the standard SCHEMA format.
 
-            Entries match the structure produced by ParquetLogger._log_event():
-            - run_id is set to response_id for top-level queryability
-            - payload contains execution wrapper + data + raw sections
+            Delegates to logger._log_event() so all entries go through the same
+            code path as regular ParquetLogger events, including _safe_json_dumps().
             """
             if logger:
-                ts = datetime.now(timezone.utc)
                 payload = {
                     "event_type": event_type,
-                    "timestamp": ts.isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "execution": {
                         "run_id": response_id,
                         "parent_run_id": "",
@@ -327,15 +304,7 @@ async def retrieve_background_responses(
                     "data": data,
                     "raw": {}
                 }
-                logger._add_entry({
-                    'timestamp': ts,
-                    'run_id': response_id,
-                    'parent_run_id': '',
-                    'custom_id': custom_id,
-                    'event_type': event_type,
-                    'logger_metadata': logger.logger_metadata_json,
-                    'payload': json.dumps(payload),
-                })
+                logger._log_event(payload)
 
         _log('background_retrieval_attempt', {
             'response_id': response_id,
@@ -343,7 +312,7 @@ async def retrieve_background_responses(
         })
 
         # Outer polling loop — keeps going while response is pending
-        for poll_attempt in range(max_poll_attempts):
+        for poll_attempt in range(rc.max_poll_attempts):
             nonlocal rate_limit_reset, rate_limit_remaining
 
             # Check rate limits before making a request
@@ -354,11 +323,11 @@ async def retrieve_background_responses(
             # Inner error-retry loop — retries only on transient failures
             response = None
             last_error = None
-            for error_attempt in range(max_retries):
+            for error_attempt in range(rc.max_retries):
                 try:
                     response = await asyncio.wait_for(
                         openai_client.responses.retrieve(response_id),
-                        timeout=timeout,
+                        timeout=rc.timeout,
                     )
                     # Update rate limit state from response headers
                     if hasattr(response, 'headers'):
@@ -371,7 +340,7 @@ async def retrieve_background_responses(
                     break  # successful API call
 
                 except asyncio.TimeoutError:
-                    last_error = f"Timeout after {timeout}s"
+                    last_error = f"Timeout after {rc.timeout}s"
                     await asyncio.sleep(2 ** error_attempt)
 
                 except Exception as e:
@@ -390,14 +359,11 @@ async def retrieve_background_responses(
                     'response_id': response_id,
                     'error': last_error,
                     'error_type': 'retrieval_failed',
-                    'attempts': max_retries,
+                    'attempts': rc.max_retries,
                 })
                 failed_ids[response_id] = last_error
                 processed_ids.add(response_id)
-                if progress_bar:
-                    progress_bar.update(1)
-                    progress_bar.refresh()
-                if return_results:
+                if rc.return_results:
                     return {'response_id': response_id, 'status': 'failed', 'openai_response': None, 'error': last_error}
                 return None
 
@@ -428,10 +394,7 @@ async def retrieve_background_responses(
                     'poll_attempts': poll_attempt + 1,
                 })
                 processed_ids.add(response_id)
-                if progress_bar:
-                    progress_bar.update(1)
-                    progress_bar.refresh()
-                if return_results:
+                if rc.return_results:
                     return {'response_id': response_id, 'status': 'completed', 'openai_response': response_data, 'error': None}
                 return None
 
@@ -447,10 +410,7 @@ async def retrieve_background_responses(
                 })
                 failed_ids[response_id] = error_msg
                 processed_ids.add(response_id)
-                if progress_bar:
-                    progress_bar.update(1)
-                    progress_bar.refresh()
-                if return_results:
+                if rc.return_results:
                     return {'response_id': response_id, 'status': response_status, 'openai_response': response_data, 'error': error_msg}
                 return None
 
@@ -460,32 +420,30 @@ async def retrieve_background_responses(
                     'response_id': response_id,
                     'openai_status': response_status,
                     'poll_attempt': poll_attempt + 1,
-                    'next_check_in': poll_interval,
+                    'next_check_in': rc.poll_interval,
                 })
-                await asyncio.sleep(poll_interval)
+                await asyncio.sleep(rc.poll_interval)
 
         # Exhausted max_poll_attempts without a terminal status
-        error_msg = f"Exceeded max_poll_attempts ({max_poll_attempts}) — response never completed"
+        error_msg = f"Exceeded max_poll_attempts ({rc.max_poll_attempts}) — response never completed"
         _log('background_retrieval_error', {
             'response_id': response_id,
             'error': error_msg,
             'error_type': 'poll_timeout',
-            'poll_attempts': max_poll_attempts,
+            'poll_attempts': rc.max_poll_attempts,
         })
         failed_ids[response_id] = error_msg
         processed_ids.add(response_id)
-        if progress_bar:
-            progress_bar.update(1)
-            progress_bar.refresh()
-        if return_results:
+        if rc.return_results:
             return {'response_id': response_id, 'status': 'poll_timeout', 'openai_response': None, 'error': error_msg}
         return None
 
     # Process in batches (controls max concurrency)
     rows = df.to_dict('records')
+    completed_count = len(processed_ids)  # account for checkpoint-resumed items
 
-    for i in range(0, len(rows), batch_size):
-        batch = rows[i:i + batch_size]
+    for i in range(0, len(rows), rc.batch_size):
+        batch = rows[i:i + rc.batch_size]
 
         batch_results = await asyncio.gather(
             *[retrieve_single(row) for row in batch],
@@ -494,51 +452,50 @@ async def retrieve_background_responses(
 
         for row, result in zip(batch, batch_results):
             if isinstance(result, Exception):
-                response_id = row[response_id_col]
+                response_id = row[cc.response_id]
                 error_msg = str(result)
                 failed_ids[response_id] = error_msg
                 processed_ids.add(response_id)
-                if progress_bar:
-                    progress_bar.update(1)
-                    progress_bar.refresh()
-                if return_results:
+                if rc.return_results:
                     results.append({
                         'response_id': response_id,
                         'status': 'error',
                         'openai_response': None,
                         'error': error_msg,
                     })
-            elif result is not None and return_results:
+            elif result is not None and rc.return_results:
                 results.append(result)
 
             # Add to checkpoint batch
-            if checkpoint_file:
+            if rc.checkpoint_file:
                 checkpoint_batch.append({
-                    'response_id': row[response_id_col],
+                    'response_id': row[cc.response_id],
                     'processed': True,
-                    'error': failed_ids.get(row[response_id_col]),
+                    'error': failed_ids.get(row[cc.response_id]),
                 })
 
+        # Print progress after each gather batch completes
+        completed_count += len(batch)
+        if rc.show_progress and (completed_count % progress_interval == 0 or completed_count == total_count):
+            print(f"  Retrieved {completed_count}/{total_count} responses ({100 * completed_count // total_count}%)")
+
         # Save checkpoint periodically
-        if checkpoint_file and len(checkpoint_batch) >= 100:
-            save_checkpoint(checkpoint_file, checkpoint_batch)
+        if rc.checkpoint_file and len(checkpoint_batch) >= 100:
+            save_checkpoint(rc.checkpoint_file, checkpoint_batch)
             checkpoint_batch = []
 
     # Final checkpoint save
-    if checkpoint_file and checkpoint_batch:
-        save_checkpoint(checkpoint_file, checkpoint_batch)
+    if rc.checkpoint_file and checkpoint_batch:
+        save_checkpoint(rc.checkpoint_file, checkpoint_batch)
 
     # Final flush of logger buffer
     if logger and hasattr(logger, 'flush'):
         logger.flush()
 
-    # Clean up
-    if progress_bar:
-        progress_bar.close()
+    if rc.show_progress:
+        print(f"\nRetrieval complete: {len(processed_ids)} processed, {len(failed_ids)} failed")
 
-    print(f"\nRetrieval complete: {len(processed_ids)} processed, {len(failed_ids)} failed")
-
-    if return_results:
+    if rc.return_results:
         return pd.DataFrame(results)
     return None
 

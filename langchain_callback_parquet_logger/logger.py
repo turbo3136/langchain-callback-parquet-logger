@@ -116,69 +116,48 @@ class ParquetLogger(BaseCallbackHandler):
         except ImportError:
             return False
 
-    def _serialize_any(self, obj: Any) -> Any:
-        """Try all possible serialization methods for complete data capture."""
+    @staticmethod
+    def _serialize_obj(obj: Any) -> Any:
+        """Try model_dump → to_dict → __dict__ in order. Returns obj unchanged if all fail."""
         try:
-            # Special handling for LLMResult to preserve nested AIMessage metadata
-            if obj.__class__.__name__ == 'LLMResult':
-                # First get the standard serialization
-                if hasattr(obj, 'model_dump'):
-                    result = obj.model_dump(mode='json', by_alias=False)
-                elif hasattr(obj, 'to_dict'):
-                    result = obj.to_dict()
-                elif hasattr(obj, '__dict__'):
-                    result = {k: v for k, v in obj.__dict__.items() if not k.startswith('_')}
-                else:
-                    result = obj
-
-                # Fix nested message serialization to preserve all metadata
-                if 'generations' in result and hasattr(obj, 'generations'):
-                    for i, gen_list in enumerate(obj.generations):
-                        for j, gen in enumerate(gen_list):
-                            if hasattr(gen, 'message'):
-                                # Directly serialize the message to preserve all fields
-                                msg = gen.message
-                                if hasattr(msg, 'model_dump'):
-                                    result['generations'][i][j]['message'] = msg.model_dump(mode='json', by_alias=False)
-                                elif hasattr(msg, 'to_dict'):
-                                    result['generations'][i][j]['message'] = msg.to_dict()
-                                elif hasattr(msg, '__dict__'):
-                                    result['generations'][i][j]['message'] = {
-                                        k: v for k, v in msg.__dict__.items() if not k.startswith('_')
-                                    }
-                return result
-
-            # Try various serialization methods in order of preference
-            if hasattr(obj, 'model_dump'):  # Pydantic v2
+            if hasattr(obj, 'model_dump'):
                 result = obj.model_dump(mode='json', by_alias=False)
                 if isinstance(result, (dict, list, str, int, float, bool, type(None))):
                     return result
             elif hasattr(obj, 'to_dict'):
                 return obj.to_dict()
             elif hasattr(obj, '__dict__'):
-                # Get object attributes (skip private ones)
                 return {k: v for k, v in obj.__dict__.items() if not k.startswith('_')}
-            else:
-                # Return as-is, let _safe_json_dumps handle edge cases
-                return obj
         except Exception:
-            # If all else fails, return as-is
+            pass
+        return obj
+
+    def _serialize_any(self, obj: Any) -> Any:
+        """Try all possible serialization methods for complete data capture."""
+        try:
+            # Special handling for LLMResult to preserve nested AIMessage metadata
+            if obj.__class__.__name__ == 'LLMResult':
+                result = self._serialize_obj(obj)
+
+                # Fix nested message serialization to preserve all fields
+                if isinstance(result, dict) and 'generations' in result and hasattr(obj, 'generations'):
+                    for i, gen_list in enumerate(obj.generations):
+                        for j, gen in enumerate(gen_list):
+                            if hasattr(gen, 'message'):
+                                result['generations'][i][j]['message'] = self._serialize_obj(gen.message)
+                return result
+
+            return self._serialize_obj(obj)
+        except Exception:
             return obj
 
     def _safe_json_dumps(self, obj: Any) -> str:
         """Convert object to JSON string safely."""
         def default(o):
-            # Defensive handling for Pydantic models that weren't pre-serialized
-            if hasattr(o, 'model_dump'):
-                try:
-                    result = o.model_dump(mode='json', by_alias=False)
-                    if isinstance(result, (dict, list, str, int, float, bool, type(None))):
-                        return result
-                except Exception:
-                    pass  # Fall through to string conversion
-            if hasattr(o, '__str__'):
-                return str(o)
-            return f"<{type(o).__name__}>"
+            result = self._serialize_obj(o)
+            if result is not o:
+                return result
+            return str(o)
         return json.dumps(obj, default=default)
 
     def _create_standard_payload(self, event_type: str, **kwargs) -> Dict[str, Any]:
@@ -264,6 +243,15 @@ class ParquetLogger(BaseCallbackHandler):
         # Raw already has kwargs from _create_standard_payload
         self._log_event(payload)
 
+    def _handle_error_event(self, event_type: str, error: Exception, **kwargs) -> None:
+        """Generic error event handler shared by on_llm_error, on_chain_error, on_tool_error."""
+        if event_type not in self.event_types:
+            return
+        payload = self._create_standard_payload(event_type, **kwargs)
+        self._add_error_info(payload, error)
+        payload["raw"]["error"] = self._serialize_any(error)
+        self._log_event(payload)
+
     # Event handlers
     def on_llm_start(self, serialized: Dict, prompts: List[str], **kwargs):
         """Log LLM start event."""
@@ -324,14 +312,7 @@ class ParquetLogger(BaseCallbackHandler):
 
     def on_llm_error(self, error, **kwargs):
         """Log LLM error event."""
-        if 'llm_error' not in self.event_types:
-            return
-
-        payload = self._create_standard_payload('llm_error', **kwargs)
-        self._add_error_info(payload, error)
-        # Capture complete error in raw
-        payload["raw"]["error"] = self._serialize_any(error)
-        self._log_event(payload)
+        self._handle_error_event('llm_error', error, **kwargs)
 
     def on_chain_start(self, serialized: Dict[str, Any], inputs: Dict[str, Any], **kwargs):
         """Log chain start event."""
@@ -356,14 +337,7 @@ class ParquetLogger(BaseCallbackHandler):
 
     def on_chain_error(self, error: Exception, **kwargs):
         """Log chain error event."""
-        if 'chain_error' not in self.event_types:
-            return
-
-        payload = self._create_standard_payload('chain_error', **kwargs)
-        self._add_error_info(payload, error)
-        # Capture complete error in raw
-        payload["raw"]["error"] = self._serialize_any(error)
-        self._log_event(payload)
+        self._handle_error_event('chain_error', error, **kwargs)
 
     def on_tool_start(self, serialized: Dict[str, Any], input_str: str, **kwargs):
         """Log tool start event."""
@@ -390,14 +364,7 @@ class ParquetLogger(BaseCallbackHandler):
 
     def on_tool_error(self, error: Exception, **kwargs):
         """Log tool error event."""
-        if 'tool_error' not in self.event_types:
-            return
-
-        payload = self._create_standard_payload('tool_error', **kwargs)
-        self._add_error_info(payload, error)
-        # Capture complete error in raw
-        payload["raw"]["error"] = self._serialize_any(error)
-        self._log_event(payload)
+        self._handle_error_event('tool_error', error, **kwargs)
 
     def on_agent_action(self, action, **kwargs):
         """Log agent action event."""
@@ -523,12 +490,7 @@ class ParquetLogger(BaseCallbackHandler):
                         parts.append(f"date={date.today()}")
                     elif p == "event_type":
                         parts.append(f"event_type={entry.get('event_type', 'unknown')}")
-                if not parts:
-                    return None
-                result = Path(parts[0])
-                for part in parts[1:]:
-                    result = result / part
-                return result
+                return Path(*parts) if parts else None
 
             # Group entries by their partition directory (preserves insertion order)
             groups: Dict[str, list] = {}

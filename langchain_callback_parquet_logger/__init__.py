@@ -12,7 +12,7 @@ from .config import (
     EventType,
     RetrievalConfig,
 )
-from .batch import batch_run, batch_process, retrieve_batch_responses
+from .batch import Batch, BatchOutcome
 
 # Optional imports with better error messages
 try:
@@ -22,7 +22,7 @@ except ImportError:
     retrieve_background_responses = None
 
 
-__version__ = "3.2.1"
+__version__ = "3.3.0"
 
 __all__ = [
     # Core
@@ -30,9 +30,8 @@ __all__ = [
     'with_tags',
 
     # Batch processing
-    'batch_run',
-    'batch_process',
-    'retrieve_batch_responses',
+    'Batch',
+    'BatchOutcome',
 
     # Configurations
     'S3Config',

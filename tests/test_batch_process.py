@@ -1,5 +1,5 @@
 """
-Tests for batch_process functionality.
+Tests for Batch class functionality.
 """
 
 import pytest
@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch, Mock, AsyncMock, MagicMock, PropertyMock
 from langchain_callback_parquet_logger import (
-    batch_process, with_tags,
+    Batch, BatchOutcome, with_tags,
     LLMConfig, JobConfig, StorageConfig, ProcessingConfig,
     ColumnConfig, S3Config
 )
@@ -39,12 +39,12 @@ def create_mock_llm_class():
     return MockLLM
 
 
-class TestBatchProcess:
-    """Test batch_process functionality."""
+class TestBatch:
+    """Test Batch class functionality."""
 
     @pytest.mark.asyncio
-    async def test_batch_process_local_only(self, sample_dataframe):
-        """Test batch_process with local storage only."""
+    async def test_batch_local_only(self, sample_dataframe):
+        """Test Batch.run() with local storage only."""
         df = sample_dataframe.copy()
         df['prompt'] = df['text']
         df['config'] = df['id'].apply(lambda x: with_tags(custom_id=str(x)))
@@ -52,23 +52,14 @@ class TestBatchProcess:
         MockLLM = create_mock_llm_class()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            results = await batch_process(
+            batch = Batch(
+                job_config=JobConfig(category="test_job", subcategory="test_sub"),
+                storage_config=StorageConfig(output_dir=tmpdir),
+                processing_config=ProcessingConfig(show_progress=False, return_results=True),
+            )
+            results = await batch.run(
                 df,
-                llm_config=LLMConfig(
-                    llm_class=MockLLM,
-                    llm_kwargs={'model': 'test-model'}
-                ),
-                job_config=JobConfig(
-                    category="test_job",
-                    subcategory="test_sub"
-                ),
-                storage_config=StorageConfig(
-                    output_dir=tmpdir
-                ),
-                processing_config=ProcessingConfig(
-                    show_progress=False,
-                    return_results=True
-                )
+                llm_config=LLMConfig(llm_class=MockLLM, llm_kwargs={'model': 'test-model'}),
             )
 
             # Check that results were returned
@@ -80,8 +71,8 @@ class TestBatchProcess:
             assert expected_path.exists()
 
     @pytest.mark.asyncio
-    async def test_batch_process_with_s3(self, sample_dataframe):
-        """Test batch_process with S3 configuration."""
+    async def test_batch_with_s3(self, sample_dataframe):
+        """Test Batch.run() with S3 configuration."""
         df = sample_dataframe.copy()
         df['prompt'] = df['text']
         df['config'] = df['id'].apply(lambda x: with_tags(custom_id=str(x)))
@@ -95,15 +86,8 @@ class TestBatchProcess:
                 mock_s3_client = MagicMock()
                 mock_client.return_value = mock_s3_client
 
-                results = await batch_process(
-                    df,
-                    llm_config=LLMConfig(
-                        llm_class=MockLLM,
-                        llm_kwargs={'model': 'test-model'}
-                    ),
-                    job_config=JobConfig(
-                        category="test_job"
-                    ),
+                batch = Batch(
+                    job_config=JobConfig(category="test_job"),
                     storage_config=StorageConfig(
                         output_dir=tmpdir,
                         path_template="{job_category}/{job_subcategory}",
@@ -115,7 +99,11 @@ class TestBatchProcess:
                     processing_config=ProcessingConfig(
                         show_progress=False,
                         buffer_size=1  # Force immediate flush to test S3 upload
-                    )
+                    ),
+                )
+                results = await batch.run(
+                    df,
+                    llm_config=LLMConfig(llm_class=MockLLM, llm_kwargs={'model': 'test-model'}),
                 )
 
                 # Check local directory was created
@@ -123,8 +111,8 @@ class TestBatchProcess:
                 assert expected_path.exists()
 
     @pytest.mark.asyncio
-    async def test_batch_process_structured_output(self, sample_dataframe):
-        """Test batch_process with structured output."""
+    async def test_batch_structured_output(self, sample_dataframe):
+        """Test Batch.run() with structured output."""
         from pydantic import BaseModel
 
         class TestModel(BaseModel):
@@ -150,27 +138,24 @@ class TestBatchProcess:
         MockStructuredLLM.__module__ = 'test_module'
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            results = await batch_process(
+            batch = Batch(
+                storage_config=StorageConfig(output_dir=tmpdir),
+                processing_config=ProcessingConfig(show_progress=False, return_results=True),
+            )
+            results = await batch.run(
                 df,
                 llm_config=LLMConfig(
                     llm_class=MockStructuredLLM,
                     llm_kwargs={'model': 'test-model'},
                     structured_output=TestModel
                 ),
-                storage_config=StorageConfig(
-                    output_dir=tmpdir
-                ),
-                processing_config=ProcessingConfig(
-                    show_progress=False,
-                    return_results=True
-                )
             )
 
             # Check results
             assert len(results) == len(df)
 
     @pytest.mark.asyncio
-    async def test_batch_process_llm_types(self, sample_dataframe):
+    async def test_batch_llm_types(self, sample_dataframe):
         """Test that different LLM classes work with batch processing."""
         df = sample_dataframe.copy()
         df['prompt'] = df['text']
@@ -198,26 +183,20 @@ class TestBatchProcess:
                     mock_logger_instance.__enter__ = Mock(return_value=mock_logger_instance)
                     mock_logger_instance.__exit__ = Mock(return_value=None)
 
-                    await batch_process(
+                    batch = Batch(
+                        storage_config=StorageConfig(output_dir=tmpdir),
+                        processing_config=ProcessingConfig(show_progress=False, buffer_size=1000),
+                    )
+                    await batch.run(
                         df,
-                        llm_config=LLMConfig(
-                            llm_class=MockTypedLLM,
-                            llm_kwargs={'model': 'test-model'}
-                        ),
-                        storage_config=StorageConfig(
-                            output_dir=tmpdir
-                        ),
-                        processing_config=ProcessingConfig(
-                            show_progress=False,
-                            buffer_size=1000
-                        )
+                        llm_config=LLMConfig(llm_class=MockTypedLLM, llm_kwargs={'model': 'test-model'}),
                     )
 
                     # Check that ParquetLogger was called
                     assert MockLogger.called
 
     @pytest.mark.asyncio
-    async def test_batch_process_path_templates(self, sample_dataframe):
+    async def test_batch_path_templates(self, sample_dataframe):
         """Test path template formatting."""
         df = sample_dataframe.copy()
         df['prompt'] = df['text']
@@ -226,12 +205,7 @@ class TestBatchProcess:
         MockLLM = create_mock_llm_class()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            await batch_process(
-                df,
-                llm_config=LLMConfig(
-                    llm_class=MockLLM,
-                    llm_kwargs={'model': 'test-model'}
-                ),
+            batch = Batch(
                 job_config=JobConfig(
                     category="emails",
                     subcategory="validation",
@@ -242,9 +216,11 @@ class TestBatchProcess:
                     output_dir=tmpdir,
                     path_template="{environment}/{job_category}/v{job_version_safe}/{job_subcategory}"
                 ),
-                processing_config=ProcessingConfig(
-                    show_progress=False
-                )
+                processing_config=ProcessingConfig(show_progress=False),
+            )
+            await batch.run(
+                df,
+                llm_config=LLMConfig(llm_class=MockLLM, llm_kwargs={'model': 'test-model'}),
             )
 
             # Check that path was formatted correctly (version dots replaced with underscores)
@@ -252,7 +228,7 @@ class TestBatchProcess:
             assert expected_path.exists()
 
     @pytest.mark.asyncio
-    async def test_batch_process_override_params(self, sample_dataframe):
+    async def test_batch_override_params(self, sample_dataframe):
         """Test logger and batch override parameters."""
         df = sample_dataframe.copy()
         df['prompt'] = df['text']
@@ -267,26 +243,24 @@ class TestBatchProcess:
                 mock_logger_instance.__enter__ = Mock(return_value=mock_logger_instance)
                 mock_logger_instance.__exit__ = Mock(return_value=None)
 
-                # Use valid ParquetLogger parameters in override
-                await batch_process(
+                batch = Batch(
+                    storage_config=StorageConfig(
+                        output_dir=tmpdir,
+                        s3_config=S3Config(bucket="test-bucket", retry_attempts=5)
+                    ),
+                    processing_config=ProcessingConfig(
+                        buffer_size=500,
+                        event_types=['llm_start', 'llm_end', 'chain_start'],
+                        show_progress=False
+                    ),
+                )
+                await batch.run(
                     df,
                     llm_config=LLMConfig(
                         llm_class=MockLLM,
                         llm_kwargs={'model': 'test-model'},
                         model_kwargs={'temperature': 0.5}
                     ),
-                    storage_config=StorageConfig(
-                        output_dir=tmpdir,
-                        s3_config=S3Config(
-                            bucket="test-bucket",
-                            retry_attempts=5
-                        )
-                    ),
-                    processing_config=ProcessingConfig(
-                        buffer_size=500,
-                        event_types=['llm_start', 'llm_end', 'chain_start'],
-                        show_progress=False
-                    )
                 )
 
                 # Check that logger overrides were applied
@@ -297,27 +271,23 @@ class TestBatchProcess:
                     assert call_kwargs['event_types'] == ['llm_start', 'llm_end', 'chain_start']
 
     @pytest.mark.asyncio
-    async def test_batch_process_missing_columns(self, sample_dataframe):
+    async def test_batch_missing_columns(self, sample_dataframe):
         """Test error when required columns are missing."""
         df = sample_dataframe.copy()
         # Don't add the required 'prompt' column
 
         MockLLM = create_mock_llm_class()
 
-        with pytest.raises(ValueError, match="DataFrame missing required column"):
-            await batch_process(
-                df,
-                llm_config=LLMConfig(
-                    llm_class=MockLLM,
-                    llm_kwargs={'model': 'test-model'}
-                ),
-                storage_config=StorageConfig(
-                    output_dir="./test"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch = Batch(storage_config=StorageConfig(output_dir=tmpdir))
+            with pytest.raises(ValueError, match="DataFrame missing required column"):
+                await batch.run(
+                    df,
+                    llm_config=LLMConfig(llm_class=MockLLM, llm_kwargs={'model': 'test-model'}),
                 )
-            )
 
     @pytest.mark.asyncio
-    async def test_batch_process_environment_s3_bucket(self, sample_dataframe):
+    async def test_batch_environment_s3_bucket(self, sample_dataframe):
         """Test that S3 bucket is read from environment variable."""
         df = sample_dataframe.copy()
         df['prompt'] = df['text']
@@ -333,21 +303,16 @@ class TestBatchProcess:
                     mock_logger_instance.__enter__ = Mock(return_value=mock_logger_instance)
                     mock_logger_instance.__exit__ = Mock(return_value=None)
 
-                    await batch_process(
-                        df,
-                        llm_config=LLMConfig(
-                            llm_class=MockLLM,
-                            llm_kwargs={'model': 'test-model'}
-                        ),
+                    batch = Batch(
                         storage_config=StorageConfig(
                             output_dir=tmpdir,
-                            s3_config=S3Config(
-                                bucket='env-bucket'
-                            )
+                            s3_config=S3Config(bucket='env-bucket')
                         ),
-                        processing_config=ProcessingConfig(
-                            show_progress=False
-                        )
+                        processing_config=ProcessingConfig(show_progress=False),
+                    )
+                    await batch.run(
+                        df,
+                        llm_config=LLMConfig(llm_class=MockLLM, llm_kwargs={'model': 'test-model'}),
                     )
 
                     # Check that S3 bucket from env was used
@@ -360,7 +325,7 @@ class TestBatchProcess:
                             assert call_kwargs['s3_config'].bucket == 'env-bucket'
 
     @pytest.mark.asyncio
-    async def test_batch_process_version_paths(self, sample_dataframe):
+    async def test_batch_version_paths(self, sample_dataframe):
         """Test that versions are correctly sanitized in both local and S3 paths."""
         df = sample_dataframe.copy()
         df['prompt'] = df['text']
@@ -374,12 +339,7 @@ class TestBatchProcess:
                 mock_s3_client = MagicMock()
                 mock_client.return_value = mock_s3_client
 
-                await batch_process(
-                    df,
-                    llm_config=LLMConfig(
-                        llm_class=MockLLM,
-                        llm_kwargs={'model': 'test-model'}
-                    ),
+                batch = Batch(
                     job_config=JobConfig(
                         category="ml_models",
                         subcategory="classification",
@@ -388,47 +348,32 @@ class TestBatchProcess:
                     storage_config=StorageConfig(
                         output_dir=tmpdir,
                         # Using default template which includes version
-                        s3_config=S3Config(
-                            bucket="test-bucket",
-                            prefix="models/"
-                        )
+                        s3_config=S3Config(bucket="test-bucket", prefix="models/")
                     ),
                     processing_config=ProcessingConfig(
                         show_progress=False,
                         buffer_size=1  # Force immediate flush
-                    )
+                    ),
+                )
+                await batch.run(
+                    df,
+                    llm_config=LLMConfig(llm_class=MockLLM, llm_kwargs={'model': 'test-model'}),
                 )
 
                 # Check local path has sanitized version
                 expected_local = Path(tmpdir) / "ml_models" / "classification" / "v3_2_1"
                 assert expected_local.exists(), f"Expected path {expected_local} does not exist"
 
-                # Check S3 prefix was set correctly with sanitized version
-                # The s3_config.prefix should have been updated to include the formatted path
-                logger_call = [call for call in mock_s3_client.put_object.call_args_list
-                             if call[1].get('Key', '').startswith('models/ml_models/classification/v3_2_1/')]
-                # We expect at least one call with the correct path structure
-                # Note: actual S3 upload verification would require checking mock_s3_client.put_object calls
-
         # Test 2: Without version specified (should use 'unversioned')
         with tempfile.TemporaryDirectory() as tmpdir:
-            await batch_process(
+            batch = Batch(
+                job_config=JobConfig(category="experiments", subcategory="baseline"),
+                storage_config=StorageConfig(output_dir=tmpdir),
+                processing_config=ProcessingConfig(show_progress=False),
+            )
+            await batch.run(
                 df,
-                llm_config=LLMConfig(
-                    llm_class=MockLLM,
-                    llm_kwargs={'model': 'test-model'}
-                ),
-                job_config=JobConfig(
-                    category="experiments",
-                    subcategory="baseline"
-                    # No version specified
-                ),
-                storage_config=StorageConfig(
-                    output_dir=tmpdir
-                ),
-                processing_config=ProcessingConfig(
-                    show_progress=False
-                )
+                llm_config=LLMConfig(llm_class=MockLLM, llm_kwargs={'model': 'test-model'}),
             )
 
             # Check local path has 'unversioned' as default
@@ -457,24 +402,21 @@ class TestBatchProcess:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # This should not raise "RunnableSequence has no field callbacks"
-            results = await batch_process(
+            batch = Batch(
+                job_config=JobConfig(
+                    category="structured_test",
+                    description="Testing structured output with callbacks"
+                ),
+                storage_config=StorageConfig(output_dir=tmpdir),
+                processing_config=ProcessingConfig(show_progress=False, return_results=True),
+            )
+            results = await batch.run(
                 df,
                 llm_config=LLMConfig(
                     llm_class=MockLLM,
                     llm_kwargs={'model': 'test-model'},
                     structured_output=TestSchema  # This causes LLM to be wrapped in RunnableSequence
                 ),
-                job_config=JobConfig(
-                    category="structured_test",
-                    description="Testing structured output with callbacks"
-                ),
-                storage_config=StorageConfig(
-                    output_dir=tmpdir
-                ),
-                processing_config=ProcessingConfig(
-                    show_progress=False,
-                    return_results=True
-                )
             )
 
             # Verify the process completed without errors
@@ -484,3 +426,76 @@ class TestBatchProcess:
             # Check that callbacks were properly passed through LLM constructor
             # The MockLLM should have received callbacks in its kwargs
             # This is verified implicitly by the test not raising an error
+
+    @pytest.mark.asyncio
+    async def test_batch_pending_response_ids(self, sample_dataframe):
+        """Test that response_id_extractor captures background response IDs."""
+        df = sample_dataframe.copy()
+        df['prompt'] = df['text']
+        df['config'] = df['id'].apply(lambda x: with_tags(custom_id=str(x)))
+
+        # Mock LLM that returns objects with a response_id attribute
+        class MockBgLLM:
+            def __init__(self, **kwargs):
+                self.callbacks = kwargs.get('callbacks', [])
+                self._call_count = 0
+                self.ainvoke = AsyncMock(side_effect=self._invoke)
+
+            async def _invoke(self, **kwargs):
+                self._call_count += 1
+                result = Mock()
+                result.response_id = f'resp_{self._call_count:03d}'
+                result.content = 'queued response'
+                return result
+
+        MockBgLLM.__name__ = 'MockBgLLM'
+        MockBgLLM.__module__ = 'test_module'
+
+        def extract_id(result, row):
+            return getattr(result, 'response_id', None)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch = Batch(
+                storage_config=StorageConfig(output_dir=tmpdir),
+                processing_config=ProcessingConfig(
+                    show_progress=False,
+                    return_results=True,
+                    return_exceptions=True,
+                ),
+            )
+            results = await batch.run(
+                df,
+                llm_config=LLMConfig(llm_class=MockBgLLM),
+                response_id_extractor=extract_id,
+            )
+
+            # Should have captured response IDs
+            assert len(batch.pending_response_ids) == len(df)
+            for rid in batch.pending_response_ids:
+                assert rid.startswith('resp_')
+
+    @pytest.mark.asyncio
+    async def test_batch_run_and_retrieve_structure(self, sample_dataframe):
+        """Test run_and_retrieve() returns a BatchOutcome with both result attributes."""
+        df = sample_dataframe.copy()
+        df['prompt'] = df['text']
+
+        MockLLM = create_mock_llm_class()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch = Batch(
+                storage_config=StorageConfig(output_dir=tmpdir),
+                processing_config=ProcessingConfig(show_progress=False, return_results=True),
+            )
+            # Patch retrieve() to avoid needing a real OpenAI client
+            batch.retrieve = AsyncMock(return_value=pd.DataFrame())
+
+            outcome = await batch.run_and_retrieve(
+                df,
+                llm_config=LLMConfig(llm_class=MockLLM, llm_kwargs={'model': 'test-model'}),
+            )
+
+            assert isinstance(outcome, BatchOutcome)
+            assert outcome.batch_results is not None
+            assert outcome.retrieval_results is not None
+            batch.retrieve.assert_awaited_once()

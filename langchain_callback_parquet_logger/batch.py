@@ -3,10 +3,10 @@
 import asyncio
 import os
 import warnings
-from pathlib import Path
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
-from dataclasses import asdict
-from typing import Any, Optional, TYPE_CHECKING, Type, List
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 import pandas as pd
 from langchain_core.runnables import RunnableLambda
@@ -19,7 +19,14 @@ from .config import (
 from .tagging import with_tags
 
 
-async def batch_run(
+@dataclass
+class BatchOutcome:
+    """Return value from Batch.run_and_retrieve() containing both processing and retrieval results."""
+    batch_results: Optional[List]
+    retrieval_results: Optional[pd.DataFrame]
+
+
+async def _batch_run(
     df: pd.DataFrame,
     llm: Any,
     prompt_col: str = "prompt",
@@ -32,10 +39,9 @@ async def batch_run(
     row_timeout: Optional[float] = None,
 ) -> Optional[list]:
     """
-    Low-level async batch processing for DataFrames.
+    Internal async batch processing engine for DataFrames.
 
-    **Most users should use batch_process() instead**, which includes automatic logging.
-    Use batch_run() only when you need direct control over logging.
+    **Most users should use Batch instead**, which includes automatic logging.
 
     Args:
         df: DataFrame with prepared data
@@ -52,15 +58,6 @@ async def batch_run(
 
     Returns:
         List of results in same order as DataFrame rows, or None if return_results=False
-
-    Example:
-        >>> # When you already have logging configured:
-        >>> with ParquetLogger('./logs') as logger:
-        >>>     llm.callbacks = [logger]
-        >>>     results = await batch_run(df, llm, max_concurrency=100)
-        >>>
-        >>> # For most users, use batch_process() instead:
-        >>> results = await batch_process(df)  # Logging handled automatically
     """
     # Suppress Pydantic serialization warnings globally so it covers
     # LangChain/OpenAI SDK internals calling model_dump() during ainvoke()
@@ -95,24 +92,19 @@ async def batch_run(
                 )
             else:
                 result = await llm.ainvoke(**invoke_kwargs)
-            completed_count += 1
-            if show_progress and (completed_count % progress_interval == 0 or completed_count == total_count):
-                print(f"  Processed {completed_count}/{total_count} rows ({100 * completed_count // total_count}%)")
             return result
         except asyncio.TimeoutError:
-            completed_count += 1
-            if show_progress and (completed_count % progress_interval == 0 or completed_count == total_count):
-                print(f"  Processed {completed_count}/{total_count} rows ({100 * completed_count // total_count}%)")
             if return_exceptions:
                 return TimeoutError(f"Row timed out after {row_timeout}s")
             raise TimeoutError(f"Row timed out after {row_timeout}s")
         except Exception as e:
-            completed_count += 1
-            if show_progress and (completed_count % progress_interval == 0 or completed_count == total_count):
-                print(f"  Processed {completed_count}/{total_count} rows ({100 * completed_count // total_count}%)")
             if return_exceptions:
                 return e
             raise
+        finally:
+            completed_count += 1
+            if show_progress and (completed_count % progress_interval == 0 or completed_count == total_count):
+                print(f"  Processed {completed_count}/{total_count} rows ({100 * completed_count // total_count}%)")
 
     # Create runner and process batch
     runner = RunnableLambda(process_row)
@@ -141,7 +133,7 @@ def _build_storage_paths(
 ) -> tuple:
     """Resolve local path and S3 config from job/storage configs.
 
-    Shared by batch_process() and retrieve_batch_responses() so both functions
+    Shared by Batch and retrieve_background_responses() so both functions
     write to the same directory structure.
 
     Returns:
@@ -160,14 +152,16 @@ def _build_storage_paths(
 
     local_path = Path(storage_config.output_dir) / storage_config.path_template.format(**template_vars)
 
-    # Check for S3 bucket in environment if not configured
-    if not storage_config.s3_config and os.environ.get('LANGCHAIN_S3_BUCKET'):
-        storage_config.s3_config = S3Config(bucket=os.environ['LANGCHAIN_S3_BUCKET'])
+    # Check for S3 bucket in environment if not configured — use a local variable,
+    # never mutate the caller's storage_config object
+    s3_config = storage_config.s3_config
+    if not s3_config and os.environ.get('LANGCHAIN_S3_BUCKET'):
+        s3_config = S3Config(bucket=os.environ['LANGCHAIN_S3_BUCKET'])
 
     resolved_s3_config = None
-    if storage_config.s3_config:
+    if s3_config:
         import copy
-        resolved_s3_config = copy.copy(storage_config.s3_config)
+        resolved_s3_config = copy.copy(s3_config)
         base_prefix = resolved_s3_config.prefix.rstrip('/')
         formatted_path = storage_config.path_template.format(**template_vars).lstrip('/')
         resolved_s3_config.prefix = f"{base_prefix}/{formatted_path}/" if base_prefix else f"{formatted_path}/"
@@ -175,244 +169,299 @@ def _build_storage_paths(
     return local_path, resolved_s3_config
 
 
-async def batch_process(
-    df: pd.DataFrame,
-    llm_config: LLMConfig,
-    job_config: Optional[JobConfig] = None,
-    storage_config: Optional[StorageConfig] = None,
-    processing_config: Optional[ProcessingConfig] = None,
-    column_config: Optional[ColumnConfig] = None,
-) -> Optional[List]:
+class Batch:
     """
-    Batch process DataFrame through LLM with automatic logging to Parquet.
+    Orchestrates a complete batch processing job lifecycle.
+
+    Resolves storage paths once, then provides ``run()``, ``retrieve()``, and
+    ``run_and_retrieve()`` methods that share the same paths and configuration.
+    Background response IDs captured during ``run()`` are automatically available
+    to ``retrieve()``, enabling a seamless run-then-retrieve workflow.
 
     Args:
-        df: DataFrame with prepared data
-        llm_config: LLM configuration including class, kwargs, and structured output
-        job_config: Job metadata configuration
-        storage_config: Storage configuration for output files
-        processing_config: Processing configuration for batch operations
-        column_config: DataFrame column name configuration
+        job_config: Job metadata (category, subcategory, version, environment).
+        storage_config: Storage paths and optional S3 configuration.
+        processing_config: Concurrency, buffer size, and other processing settings.
+        column_config: DataFrame column name mapping.
 
-    Returns:
-        List of results if processing_config.return_results=True, None otherwise
+    Example — standard batch (no background processing)::
 
-    Examples:
-        >>> # Simple usage with LLMConfig
-        >>> from langchain_openai import ChatOpenAI
-        >>> await batch_process(
-        ...     df,
-        ...     llm_config=LLMConfig(
-        ...         llm_class=ChatOpenAI,
-        ...         llm_kwargs={'model': 'gpt-4', 'temperature': 0.7}
-        ...     ),
-        ...     job_config=JobConfig(category='analysis', version='2.0')
+        >>> batch = Batch(
+        ...     job_config=JobConfig(category="analysis", version="1.0"),
+        ...     storage_config=StorageConfig(output_dir="./logs"),
         ... )
+        >>> results = await batch.run(df, llm_config)
 
-        >>> # With structured output
-        >>> from pydantic import BaseModel
-        >>> class EmailInfo(BaseModel):
-        ...     email: str
-        ...     valid: bool
-        >>>
-        >>> await batch_process(
-        ...     df,
-        ...     llm_config=LLMConfig(
-        ...         llm_class=ChatOpenAI,
-        ...         llm_kwargs={'model': 'gpt-4'},
-        ...         structured_output=EmailInfo
-        ...     ),
-        ...     job_config=JobConfig(category='email_validation')
+    Example — background processing (run then retrieve)::
+
+        >>> def extract_response_id(result, row):
+        ...     return getattr(result, 'response_metadata', {}).get('id')
+        ...
+        >>> batch = Batch(
+        ...     job_config=JobConfig(category="analysis"),
+        ...     storage_config=StorageConfig(output_dir="./logs"),
         ... )
-    """
-    # Suppress Pydantic serialization warnings globally
-    warnings.filterwarnings("ignore", category=UserWarning, module=r"^pydantic")
-
-    # Initialize configs with defaults if not provided
-    job_config = job_config or JobConfig()
-    storage_config = storage_config or StorageConfig()
-    processing_config = processing_config or ProcessingConfig()
-    column_config = column_config or ColumnConfig()
-
-    # Validate DataFrame has required columns
-    if column_config.prompt not in df.columns:
-        raise ValueError(f"DataFrame missing required column: {column_config.prompt}")
-
-    # LLM will be created inside the logger context with callbacks
-
-    # Resolve local and S3 paths
-    local_path, resolved_s3_config = _build_storage_paths(job_config, storage_config)
-    local_path.mkdir(parents=True, exist_ok=True)
-
-    # Build comprehensive logger metadata
-    logger_metadata = {
-        # Legacy flat fields (for backward compatibility in queries)
-        'job_category': job_config.category,
-        'job_subcategory': job_config.subcategory,
-        'environment': job_config.environment,
-        'job_description': job_config.description,
-        'job_version': job_config.version,
-
-        # Complete batch-level configs (NEW structure)
-        'batch_config': {
-            'job': asdict(job_config) if job_config else None,
-            'storage': {
-                'output_dir': storage_config.output_dir,
-                'path_template': storage_config.path_template,
-                's3': asdict(resolved_s3_config) if resolved_s3_config else None
-            },
-            'processing': asdict(processing_config) if processing_config else None,
-            'column': asdict(column_config) if column_config else None,
-            'llm': llm_config.to_metadata_dict(),
-        },
-
-        # Batch execution metadata
-        'batch_started_at': datetime.now(timezone.utc).isoformat(),
-        'batch_size': len(df),
-
-        # Custom metadata from job_config (if any)
-        **(job_config.metadata or {})
-    }
-
-    # Print status messages
-    if processing_config.show_progress:
-        print(f"🚀 Starting processing of {len(df)} rows...")
-        print(f"📁 Local output: {local_path}")
-        if resolved_s3_config:
-            print(f"☁️  S3 upload: s3://{resolved_s3_config.bucket}/{resolved_s3_config.prefix}")
-
-    # Process with context manager for automatic cleanup
-    with ParquetLogger(
-        log_dir=str(local_path),
-        buffer_size=processing_config.buffer_size,
-        logger_metadata=logger_metadata,
-        partition_on=processing_config.partition_on,
-        event_types=processing_config.event_types,
-        s3_config=resolved_s3_config,
-    ) as logger:
-        # Create LLM with logger as callback
-        llm = llm_config.create_llm(callbacks=[logger])
-
-        # Run batch processing
-        results = await batch_run(
-            df, llm,
-            prompt_col=column_config.prompt,
-            config_col=column_config.config,
-            tools_col=column_config.tools,
-            max_concurrency=processing_config.max_concurrency,
-            show_progress=processing_config.show_progress,
-            return_exceptions=processing_config.return_exceptions,
-            return_results=processing_config.return_results,
-            row_timeout=processing_config.row_timeout,
-        )
-
-    # Print completion message
-    if processing_config.show_progress:
-        print("✅ Processing complete!")
-        print(f"📍 Local files: {local_path}")
-        if resolved_s3_config:
-            print(f"☁️  S3 location: s3://{resolved_s3_config.bucket}/{resolved_s3_config.prefix}")
-
-    return results
-
-
-async def retrieve_batch_responses(
-    df: pd.DataFrame,
-    openai_client=None,
-    job_config: Optional[JobConfig] = None,
-    storage_config: Optional[StorageConfig] = None,
-    retrieval_config: Optional[RetrievalConfig] = None,
-    response_id_col: str = "response_id",
-    custom_id_col: str = "custom_id",
-) -> Optional[pd.DataFrame]:
-    """
-    Retrieve OpenAI background responses and log them to the same Parquet location
-    as the original batch_process() call.
-
-    Polls each response until its status is "completed" (or a terminal error/cancellation),
-    logging each pending check and the final outcome. Pass the same ``job_config`` and
-    ``storage_config`` you used in ``batch_process()`` to have all events land in one place.
-
-    Args:
-        df: DataFrame with response IDs (and optionally custom IDs) to retrieve
-        openai_client: OpenAI async client. If None, creates ``AsyncOpenAI()`` automatically
-            using ``OPENAI_API_KEY`` from the environment (same behaviour as LangChain's ChatOpenAI).
-        job_config: Job metadata — use the same values as the original batch_process() call
-        storage_config: Storage paths — use the same values as the original batch_process() call
-        retrieval_config: Polling and execution settings (poll_interval, max_poll_attempts, etc.)
-        response_id_col: Column name containing OpenAI response IDs (default: "response_id")
-        custom_id_col: Column name containing your custom row IDs (default: "custom_id")
-
-    Returns:
-        DataFrame with columns: response_id, status, openai_response, error
-        (or None if retrieval_config.return_results=False)
-
-    Example:
-        >>> from openai import AsyncOpenAI
-        >>> import langchain_callback_parquet_logger as lcpl
-        >>>
-        >>> results = await lcpl.retrieve_batch_responses(
-        ...     df,  # DataFrame with response_id and custom_id columns
+        >>> outcome = await batch.run_and_retrieve(
+        ...     df, llm_config,
         ...     openai_client=AsyncOpenAI(),
-        ...     job_config=lcpl.JobConfig(
-        ...         category=job_category,
-        ...         subcategory=job_subcategory,
-        ...         version=job_version,
-        ...         environment="hex_notebook",
-        ...     ),
-        ...     storage_config=lcpl.StorageConfig(
-        ...         output_dir="./batch_logs",
-        ...         path_template="{job_category}/{job_subcategory}/v{job_version_safe}",
-        ...         s3_config=lcpl.S3Config(bucket="my-bucket", on_failure="error"),
-        ...     ),
-        ...     retrieval_config=lcpl.RetrievalConfig(
-        ...         poll_interval=30.0,
-        ...         max_poll_attempts=40,
-        ...         checkpoint_file="./retrieval_checkpoint.parquet",
-        ...     ),
+        ...     response_id_extractor=extract_response_id,
         ... )
+        >>> batch_results = outcome.batch_results
+        >>> retrieval_df = outcome.retrieval_results
+
+    Example — inspect batch results before retrieval::
+
+        >>> batch_results = await batch.run(df, llm_config,
+        ...                                  response_id_extractor=extract_response_id)
+        >>> print(f"Captured {len(batch.pending_response_ids)} background response(s)")
+        >>> retrieval_df = await batch.retrieve(openai_client=AsyncOpenAI())
     """
-    from .background_retrieval import retrieve_background_responses
 
-    job_config = job_config or JobConfig()
-    storage_config = storage_config or StorageConfig()
-    retrieval_config = retrieval_config or RetrievalConfig()
+    def __init__(
+        self,
+        job_config: Optional[JobConfig] = None,
+        storage_config: Optional[StorageConfig] = None,
+        processing_config: Optional[ProcessingConfig] = None,
+        column_config: Optional[ColumnConfig] = None,
+    ):
+        self.job_config = job_config or JobConfig()
+        self.storage_config = storage_config or StorageConfig()
+        self.processing_config = processing_config or ProcessingConfig()
+        self.column_config = column_config or ColumnConfig()
 
-    local_path, resolved_s3_config = _build_storage_paths(job_config, storage_config)
-    local_path.mkdir(parents=True, exist_ok=True)
-
-    if retrieval_config.show_progress:
-        print(f"🔍 Retrieving {len(df)} responses...")
-        print(f"📁 Local output: {local_path}")
-        if resolved_s3_config:
-            print(f"☁️  S3 upload: s3://{resolved_s3_config.bucket}/{resolved_s3_config.prefix}")
-
-    with ParquetLogger(
-        log_dir=str(local_path),
-        buffer_size=1000,
-        partition_on="date",
-        s3_config=resolved_s3_config,
-    ) as logger:
-        results = await retrieve_background_responses(
-            df=df,
-            openai_client=openai_client,
-            logger=logger,
-            response_id_col=response_id_col,
-            custom_id_col=custom_id_col,
-            batch_size=retrieval_config.batch_size,
-            max_retries=retrieval_config.max_retries,
-            timeout=retrieval_config.timeout,
-            poll_interval=retrieval_config.poll_interval,
-            max_poll_attempts=retrieval_config.max_poll_attempts,
-            show_progress=retrieval_config.show_progress,
-            checkpoint_file=retrieval_config.checkpoint_file,
-            return_results=retrieval_config.return_results,
+        # Resolve storage paths once — shared by run() and retrieve()
+        self.local_path, self.resolved_s3_config = _build_storage_paths(
+            self.job_config, self.storage_config
         )
+        self.local_path.mkdir(parents=True, exist_ok=True)
 
-    if retrieval_config.show_progress:
-        print("✅ Retrieval complete!")
-        print(f"📍 Local files: {local_path}")
-        if resolved_s3_config:
-            print(f"☁️  S3 location: s3://{resolved_s3_config.bucket}/{resolved_s3_config.prefix}")
+        # Background response IDs captured during run() — response_id → custom_id
+        self._background_response_ids: Dict[str, str] = {}
 
-    return results
+    @property
+    def pending_response_ids(self) -> Dict[str, str]:
+        """Background response IDs captured during the last run() call (response_id → custom_id)."""
+        return dict(self._background_response_ids)
+
+    def _build_logger_metadata(self, llm_config: LLMConfig, batch_size: int) -> dict:
+        """Build the comprehensive logger metadata dict for a run."""
+        return {
+            # Complete batch-level configs
+            'batch_config': {
+                'job': asdict(self.job_config),
+                'storage': {
+                    'output_dir': self.storage_config.output_dir,
+                    'path_template': self.storage_config.path_template,
+                    's3': asdict(self.resolved_s3_config) if self.resolved_s3_config else None
+                },
+                'processing': asdict(self.processing_config),
+                'column': asdict(self.column_config),
+                'llm': llm_config.to_metadata_dict(),
+            },
+
+            # Batch execution metadata
+            'batch_started_at': datetime.now(timezone.utc).isoformat(),
+            'batch_size': batch_size,
+
+            # Custom metadata from job_config (if any)
+            **(self.job_config.metadata or {})
+        }
+
+    def _print_start(self, action: str, count: int) -> None:
+        """Print job-start status lines."""
+        print(f"{action} {count} rows...")
+        print(f"📁 Local output: {self.local_path}")
+        if self.resolved_s3_config:
+            print(f"☁️  S3 upload: s3://{self.resolved_s3_config.bucket}/{self.resolved_s3_config.prefix}")
+
+    def _print_end(self, action: str) -> None:
+        """Print job-completion status lines."""
+        print(f"✅ {action} complete!")
+        print(f"📍 Local files: {self.local_path}")
+        if self.resolved_s3_config:
+            print(f"☁️  S3 location: s3://{self.resolved_s3_config.bucket}/{self.resolved_s3_config.prefix}")
+
+    async def run(
+        self,
+        df: pd.DataFrame,
+        llm_config: LLMConfig,
+        response_id_extractor: Optional[Callable[[Any, dict], Optional[str]]] = None,
+    ) -> Optional[List]:
+        """
+        Run batch processing with automatic Parquet logging.
+
+        After _batch_run() completes, any result for which ``response_id_extractor``
+        returns a non-None string is treated as a background (queued) response.
+        Those response IDs are stored in ``self._background_response_ids`` and
+        are automatically used by ``retrieve()``.
+
+        Args:
+            df: DataFrame with one row per LLM request.
+            llm_config: LLM class and kwargs to use for the batch.
+            response_id_extractor: Optional callable ``(result, row_dict) -> str | None``
+                that extracts a background response ID from a result object.
+                Return None for synchronous (non-background) results.
+
+        Returns:
+            List of results if processing_config.return_results=True, None otherwise.
+        """
+        # Suppress Pydantic serialization warnings globally
+        warnings.filterwarnings("ignore", category=UserWarning, module=r"^pydantic")
+
+        if self.column_config.prompt not in df.columns:
+            raise ValueError(f"DataFrame missing required column: {self.column_config.prompt}")
+
+        logger_metadata = self._build_logger_metadata(llm_config, len(df))
+
+        if self.processing_config.show_progress:
+            self._print_start("🚀 Starting processing of", len(df))
+
+        with ParquetLogger(
+            log_dir=str(self.local_path),
+            buffer_size=self.processing_config.buffer_size,
+            logger_metadata=logger_metadata,
+            partition_on=self.processing_config.partition_on,
+            event_types=self.processing_config.event_types,
+            s3_config=self.resolved_s3_config,
+        ) as logger:
+            llm = llm_config.create_llm(callbacks=[logger])
+            results = await _batch_run(
+                df, llm,
+                prompt_col=self.column_config.prompt,
+                config_col=self.column_config.config,
+                tools_col=self.column_config.tools,
+                max_concurrency=self.processing_config.max_concurrency,
+                show_progress=self.processing_config.show_progress,
+                return_exceptions=self.processing_config.return_exceptions,
+                return_results=self.processing_config.return_results,
+                row_timeout=self.processing_config.row_timeout,
+            )
+
+        # Capture background response IDs from results
+        if response_id_extractor and results:
+            self._background_response_ids = {}
+            rows = df.to_dict('records')
+            for result, row in zip(results, rows):
+                if result is None or isinstance(result, (Exception, BaseException)):
+                    continue
+                try:
+                    response_id = response_id_extractor(result, row)
+                    if response_id:
+                        custom_id = row.get(self.column_config.custom_id, '')
+                        self._background_response_ids[response_id] = custom_id
+                except Exception:
+                    pass
+
+        if self.processing_config.show_progress:
+            self._print_end("Processing")
+
+        return results
+
+    async def retrieve(
+        self,
+        openai_client=None,
+        retrieval_config: Optional[RetrievalConfig] = None,
+    ) -> Optional[pd.DataFrame]:
+        """
+        Retrieve background responses and log them to the same Parquet location.
+
+        Uses response IDs captured during ``run()`` if available, otherwise
+        auto-discovers pending responses from the local Parquet files (useful
+        for cross-process resume when a process restarts after a crash).
+
+        Args:
+            openai_client: OpenAI async client. Auto-creates ``AsyncOpenAI()`` if None.
+            retrieval_config: Polling and execution settings.
+
+        Returns:
+            DataFrame with columns: response_id, status, openai_response, error
+            (or None if retrieval_config.return_results=False).
+        """
+        from .background_retrieval import retrieve_background_responses, _query_pending_responses
+        from .storage import LocalStorage, S3Storage
+
+        rc = retrieval_config or RetrievalConfig()
+
+        # Build df from in-memory captured IDs, or auto-discover from storage
+        if self._background_response_ids:
+            df = pd.DataFrame([
+                {
+                    self.column_config.response_id: rid,
+                    self.column_config.custom_id: cid,
+                }
+                for rid, cid in self._background_response_ids.items()
+            ])
+            count_desc = f"{len(df)} captured response(s)"
+        else:
+            # Auto-discover from Parquet files using this batch's storage
+            if rc.source == "s3" and self.resolved_s3_config:
+                read_storage = S3Storage(self.resolved_s3_config)
+            else:
+                read_storage = LocalStorage(self.local_path)
+
+            df = _query_pending_responses(read_storage)
+            if df.empty:
+                print("No pending responses found in storage.")
+                return pd.DataFrame() if rc.return_results else None
+            count_desc = f"{len(df)} auto-discovered response(s)"
+
+        if rc.show_progress:
+            self._print_start(f"🔍 Retrieving {count_desc} —", 0)
+
+        with ParquetLogger(
+            log_dir=str(self.local_path),
+            buffer_size=1000,
+            partition_on=self.processing_config.partition_on,
+            s3_config=self.resolved_s3_config,
+        ) as logger:
+            results = await retrieve_background_responses(
+                df=df,
+                openai_client=openai_client,
+                logger=logger,
+                retrieval_config=rc,
+                column_config=self.column_config,
+            )
+
+        if rc.show_progress:
+            self._print_end("Retrieval")
+
+        return results
+
+    async def run_and_retrieve(
+        self,
+        df: pd.DataFrame,
+        llm_config: LLMConfig,
+        openai_client=None,
+        retrieval_config: Optional[RetrievalConfig] = None,
+        response_id_extractor: Optional[Callable[[Any, dict], Optional[str]]] = None,
+    ) -> BatchOutcome:
+        """
+        Run batch processing then immediately retrieve any background responses.
+
+        This is the primary method for the background-processing workflow.
+        After the batch completes, background response IDs captured via
+        ``response_id_extractor`` are polled automatically.
+
+        Args:
+            df: DataFrame with one row per LLM request.
+            llm_config: LLM class and kwargs to use for the batch.
+            openai_client: OpenAI async client for retrieval. Auto-created if None.
+            retrieval_config: Polling and execution settings for retrieval.
+            response_id_extractor: Callable ``(result, row_dict) -> str | None``
+                that extracts a background response ID from a result object.
+
+        Returns:
+            BatchOutcome with:
+                - ``batch_results``: list of LLM results (or None)
+                - ``retrieval_results``: DataFrame of retrieved responses (or None)
+        """
+        batch_results = await self.run(
+            df, llm_config, response_id_extractor=response_id_extractor
+        )
+        retrieval_results = await self.retrieve(
+            openai_client=openai_client, retrieval_config=retrieval_config
+        )
+        return BatchOutcome(
+            batch_results=batch_results,
+            retrieval_results=retrieval_results,
+        )
