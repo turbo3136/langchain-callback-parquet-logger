@@ -11,11 +11,20 @@ import tempfile
 import pytest
 import pandas as pd
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 from langchain_callback_parquet_logger import ParquetLogger
 from langchain_callback_parquet_logger.background_retrieval import (
     retrieve_background_responses,
-    save_checkpoint
+    save_checkpoint,
+    _query_pending_responses,
+    _BACKGROUND_EVENT_TYPES,
+    _TERMINAL_RETRIEVAL_EVENT_TYPES,
 )
+from langchain_callback_parquet_logger.config import StorageConfig, JobConfig
+from langchain_callback_parquet_logger.storage import LocalStorage
+from langchain_callback_parquet_logger.logger import SCHEMA
 
 
 @pytest.fixture
@@ -360,6 +369,280 @@ async def test_logging_event_types():
         
         assert 'background_retrieval_attempt' in event_types
         assert 'background_retrieval_complete' in event_types
+
+
+@pytest.mark.asyncio
+async def test_schema_consistency():
+    """run_id should equal response_id and payload should have execution wrapper."""
+    df = pd.DataFrame({
+        'response_id': ['resp_schema_001'],
+        'custom_id': ['schema-test-001']
+    })
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        logger = ParquetLogger(log_dir=tmpdir, buffer_size=1)
+
+        client = AsyncMock()
+        client.responses.retrieve = AsyncMock(
+            return_value=MagicMock(model_dump=lambda **kwargs: {'id': 'resp_schema_001', 'status': 'completed'})
+        )
+
+        await retrieve_background_responses(
+            df,
+            client,
+            logger=logger,
+            show_progress=False
+        )
+
+        log_df = pd.read_parquet(tmpdir)
+
+        # Verify standard SCHEMA columns are present
+        for col in ['timestamp', 'run_id', 'parent_run_id', 'custom_id', 'event_type', 'logger_metadata', 'payload']:
+            assert col in log_df.columns, f"Missing column: {col}"
+
+        # run_id must equal response_id (not empty string)
+        bg_rows = log_df[log_df['event_type'].isin(_BACKGROUND_EVENT_TYPES)]
+        assert all(bg_rows['run_id'] == 'resp_schema_001'), \
+            f"Expected run_id='resp_schema_001', got: {bg_rows['run_id'].unique()}"
+
+        # custom_id must be set
+        assert all(bg_rows['custom_id'] == 'schema-test-001')
+
+        # payload must have execution wrapper with run_id, custom_id, and data section
+        for _, row in bg_rows.iterrows():
+            payload = json.loads(row['payload'])
+            assert 'execution' in payload, "payload missing 'execution' section"
+            assert 'data' in payload, "payload missing 'data' section"
+            assert 'raw' in payload, "payload missing 'raw' section"
+            assert payload['execution']['run_id'] == 'resp_schema_001'
+            assert payload['execution']['custom_id'] == 'schema-test-001'
+            assert payload['execution']['parent_run_id'] == ''
+
+
+@pytest.mark.asyncio
+async def test_auto_discovery_from_storage():
+    """Auto-discovery should find pending responses and skip completed ones."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Write some background retrieval events to simulate prior state:
+        #   resp_pending  → latest event is background_retrieval_attempt (non-terminal)
+        #   resp_done     → latest event is background_retrieval_complete (terminal)
+        logger = ParquetLogger(log_dir=tmpdir, buffer_size=10)
+        from datetime import timezone
+
+        # Pending response: only an attempt event logged
+        logger._add_entry({
+            'timestamp': datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+            'run_id': 'resp_pending',
+            'parent_run_id': '',
+            'custom_id': 'cid-pending',
+            'event_type': 'background_retrieval_attempt',
+            'logger_metadata': '{}',
+            'payload': json.dumps({
+                'event_type': 'background_retrieval_attempt',
+                'timestamp': '2026-01-01T00:00:00+00:00',
+                'execution': {'run_id': 'resp_pending', 'parent_run_id': '', 'custom_id': 'cid-pending', 'tags': [], 'metadata': {}},
+                'data': {'response_id': 'resp_pending', 'attempt_time': '2026-01-01T00:00:00+00:00'},
+                'raw': {}
+            })
+        })
+
+        # Completed response: attempt then complete events logged
+        logger._add_entry({
+            'timestamp': datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+            'run_id': 'resp_done',
+            'parent_run_id': '',
+            'custom_id': 'cid-done',
+            'event_type': 'background_retrieval_attempt',
+            'logger_metadata': '{}',
+            'payload': json.dumps({
+                'event_type': 'background_retrieval_attempt',
+                'timestamp': '2026-01-01T00:00:00+00:00',
+                'execution': {'run_id': 'resp_done', 'parent_run_id': '', 'custom_id': 'cid-done', 'tags': [], 'metadata': {}},
+                'data': {'response_id': 'resp_done', 'attempt_time': '2026-01-01T00:00:00+00:00'},
+                'raw': {}
+            })
+        })
+        logger._add_entry({
+            'timestamp': datetime(2026, 1, 1, 0, 1, 0, tzinfo=timezone.utc),
+            'run_id': 'resp_done',
+            'parent_run_id': '',
+            'custom_id': 'cid-done',
+            'event_type': 'background_retrieval_complete',
+            'logger_metadata': '{}',
+            'payload': json.dumps({
+                'event_type': 'background_retrieval_complete',
+                'timestamp': '2026-01-01T00:01:00+00:00',
+                'execution': {'run_id': 'resp_done', 'parent_run_id': '', 'custom_id': 'cid-done', 'tags': [], 'metadata': {}},
+                'data': {'response_id': 'resp_done', 'status': 'completed', 'poll_attempts': 1},
+                'raw': {}
+            })
+        })
+        logger.flush()
+
+        # Mock client returns completed for the pending response
+        client = AsyncMock()
+        client.responses.retrieve = AsyncMock(
+            return_value=MagicMock(
+                model_dump=lambda **kwargs: {'id': 'resp_pending', 'status': 'completed'}
+            )
+        )
+
+        # Use path_template="" so the resolved path is exactly tmpdir
+        # (mirroring how batch_process + retrieve would share the same resolved path)
+        storage_config = StorageConfig(output_dir=tmpdir, path_template="")
+        results = await retrieve_background_responses(
+            storage_config=storage_config,
+            openai_client=client,
+            show_progress=False,
+        )
+
+        # Only the pending response should have been retrieved
+        assert client.responses.retrieve.call_count == 1
+        call_args = client.responses.retrieve.call_args[0]
+        assert call_args[0] == 'resp_pending'
+
+        assert results is not None
+        assert len(results) == 1
+        assert results.iloc[0]['response_id'] == 'resp_pending'
+        assert results.iloc[0]['status'] == 'completed'
+
+
+@pytest.mark.asyncio
+async def test_auto_discovery_no_pending():
+    """When all responses are terminal, auto-discovery returns empty without API calls."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        logger = ParquetLogger(log_dir=tmpdir, buffer_size=10)
+        from datetime import timezone
+
+        # Write a completed response
+        logger._add_entry({
+            'timestamp': datetime(2026, 1, 1, 0, 1, 0, tzinfo=timezone.utc),
+            'run_id': 'resp_already_done',
+            'parent_run_id': '',
+            'custom_id': 'cid-done',
+            'event_type': 'background_retrieval_complete',
+            'logger_metadata': '{}',
+            'payload': json.dumps({
+                'event_type': 'background_retrieval_complete',
+                'timestamp': '2026-01-01T00:01:00+00:00',
+                'execution': {'run_id': 'resp_already_done', 'parent_run_id': '', 'custom_id': 'cid-done', 'tags': [], 'metadata': {}},
+                'data': {'response_id': 'resp_already_done', 'status': 'completed', 'poll_attempts': 1},
+                'raw': {}
+            })
+        })
+        logger.flush()
+
+        client = AsyncMock()
+        client.responses.retrieve = AsyncMock()
+
+        storage_config = StorageConfig(output_dir=tmpdir, path_template="")
+        results = await retrieve_background_responses(
+            storage_config=storage_config,
+            openai_client=client,
+            show_progress=False,
+        )
+
+        # No API calls should be made
+        assert client.responses.retrieve.call_count == 0
+        assert results is not None
+        assert len(results) == 0
+
+
+@pytest.mark.asyncio
+async def test_auto_discovery_empty_storage():
+    """When storage is empty, auto-discovery returns empty without API calls."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        client = AsyncMock()
+        client.responses.retrieve = AsyncMock()
+
+        storage_config = StorageConfig(output_dir=tmpdir, path_template="")
+        results = await retrieve_background_responses(
+            storage_config=storage_config,
+            openai_client=client,
+            show_progress=False,
+        )
+
+        assert client.responses.retrieve.call_count == 0
+        assert results is not None
+        assert len(results) == 0
+
+
+@pytest.mark.asyncio
+async def test_auto_discovery_requires_storage_config():
+    """Calling with neither df nor storage_config should raise ValueError."""
+    client = AsyncMock()
+
+    with pytest.raises(ValueError, match="storage_config"):
+        await retrieve_background_responses(
+            openai_client=client,
+            show_progress=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_source_local_uses_only_local_storage():
+    """source='local' should read only from LocalStorage, not S3."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        from langchain_callback_parquet_logger.config import RetrievalConfig, S3Config
+
+        logger = ParquetLogger(log_dir=tmpdir, buffer_size=10)
+        from datetime import timezone
+
+        logger._add_entry({
+            'timestamp': datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+            'run_id': 'resp_local_only',
+            'parent_run_id': '',
+            'custom_id': 'cid-local',
+            'event_type': 'background_retrieval_attempt',
+            'logger_metadata': '{}',
+            'payload': json.dumps({
+                'event_type': 'background_retrieval_attempt',
+                'timestamp': '2026-01-01T00:00:00+00:00',
+                'execution': {'run_id': 'resp_local_only', 'parent_run_id': '', 'custom_id': 'cid-local', 'tags': [], 'metadata': {}},
+                'data': {'response_id': 'resp_local_only', 'attempt_time': '2026-01-01T00:00:00+00:00'},
+                'raw': {}
+            })
+        })
+        logger.flush()
+
+        client = AsyncMock()
+        client.responses.retrieve = AsyncMock(
+            return_value=MagicMock(
+                model_dump=lambda **kwargs: {'id': 'resp_local_only', 'status': 'completed'}
+            )
+        )
+
+        # source="local" (default) — should find the entry written locally
+        rc = RetrievalConfig(source="local")
+        storage_config = StorageConfig(output_dir=tmpdir, path_template="")
+        results = await retrieve_background_responses(
+            storage_config=storage_config,
+            retrieval_config=rc,
+            openai_client=client,
+            show_progress=False,
+        )
+
+        assert client.responses.retrieve.call_count == 1
+        assert results.iloc[0]['response_id'] == 'resp_local_only'
+        assert results.iloc[0]['status'] == 'completed'
+
+
+@pytest.mark.asyncio
+async def test_source_s3_requires_s3_config():
+    """source='s3' without an s3_config should raise ValueError."""
+    from langchain_callback_parquet_logger.config import RetrievalConfig
+
+    client = AsyncMock()
+    # StorageConfig with no s3_config
+    storage_config = StorageConfig(output_dir="/tmp/test", path_template="")
+
+    with pytest.raises(ValueError, match="s3_config"):
+        await retrieve_background_responses(
+            storage_config=storage_config,
+            retrieval_config=RetrievalConfig(source="s3"),
+            openai_client=client,
+            show_progress=False,
+        )
 
 
 if __name__ == "__main__":

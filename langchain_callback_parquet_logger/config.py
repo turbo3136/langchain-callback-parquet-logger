@@ -95,19 +95,25 @@ class ColumnConfig:
 
 @dataclass
 class RetrievalConfig:
-    """Configuration for retrieve_batch_responses() — polling OpenAI background responses.
+    """Configuration for retrieve_background_responses() — polling OpenAI background responses.
 
     Separates polling params (how long to wait for completion) from execution params
     (concurrency, timeouts, logging).
 
+    The ``source`` field controls where the retriever looks for pending responses
+    when auto-discovering from storage (i.e. when no explicit DataFrame is supplied).
+    It only affects the *read* side — new retrieval events are always written to the
+    full configured storage regardless of this setting.
+
     Example:
         config = RetrievalConfig(
+            source="s3",            # discover pending responses from S3
             poll_interval=30.0,     # check every 30 seconds
             max_poll_attempts=40,   # give up after ~20 minutes
             batch_size=50,          # 50 concurrent polls
-            checkpoint_file="./retrieval_checkpoint.parquet",
         )
     """
+    source: Literal["local", "s3"] = "local"  # where to read pending responses from
     poll_interval: float = 30.0       # seconds between status checks when response is pending
     max_poll_attempts: int = 40       # max polls per response before giving up (40 × 30s ≈ 20 min)
     batch_size: int = 50              # number of concurrent requests

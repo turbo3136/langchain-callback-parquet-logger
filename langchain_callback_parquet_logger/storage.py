@@ -25,6 +25,16 @@ class StorageBackend(ABC):
         """Check if file exists in storage."""
         pass
 
+    @abstractmethod
+    def list_files(self) -> List[str]:
+        """Return list of relative parquet file paths under this storage root."""
+        pass
+
+    @abstractmethod
+    def read_table(self, filepath: Path) -> pa.Table:
+        """Read a parquet file and return as a PyArrow table."""
+        pass
+
 
 class LocalStorage(StorageBackend):
     """Local filesystem storage backend."""
@@ -43,6 +53,17 @@ class LocalStorage(StorageBackend):
     def exists(self, filepath: Path) -> bool:
         """Check if file exists locally."""
         return (self.base_dir / filepath).exists()
+
+    def list_files(self) -> List[str]:
+        """List all parquet files under base_dir, returning relative paths."""
+        return [
+            str(p.relative_to(self.base_dir))
+            for p in self.base_dir.rglob("*.parquet")
+        ]
+
+    def read_table(self, filepath: Path) -> pa.Table:
+        """Read a parquet file from local filesystem."""
+        return pq.read_table(self.base_dir / filepath)
 
 
 class S3Storage(StorageBackend):
@@ -114,6 +135,26 @@ class S3Storage(StorageBackend):
         except:
             return False
 
+    def list_files(self) -> List[str]:
+        """List all parquet files under the S3 prefix, returning relative paths."""
+        paginator = self.client.get_paginator('list_objects_v2')
+        files = []
+        for page in paginator.paginate(Bucket=self.config.bucket, Prefix=self.config.prefix):
+            for obj in page.get('Contents', []):
+                key = obj['Key']
+                if key.endswith('.parquet'):
+                    relative = key[len(self.config.prefix):]
+                    if relative:
+                        files.append(relative)
+        return files
+
+    def read_table(self, filepath: Path) -> pa.Table:
+        """Read a parquet file from S3."""
+        s3_key = f"{self.config.prefix}{filepath}"
+        response = self.client.get_object(Bucket=self.config.bucket, Key=s3_key)
+        data = response['Body'].read()
+        return pq.read_table(pa.BufferReader(data))
+
 
 class CompositeStorage(StorageBackend):
     """Composite storage that writes to multiple backends."""
@@ -130,6 +171,30 @@ class CompositeStorage(StorageBackend):
     def exists(self, filepath: Path) -> bool:
         """Check if file exists in any backend."""
         return any(backend.exists(filepath) for backend in self.backends)
+
+    def list_files(self) -> List[str]:
+        """List files from all backends, deduplicated (preserving first-seen order)."""
+        seen: set = set()
+        result = []
+        for backend in self.backends:
+            try:
+                for f in backend.list_files():
+                    if f not in seen:
+                        seen.add(f)
+                        result.append(f)
+            except Exception:
+                pass
+        return result
+
+    def read_table(self, filepath: Path) -> pa.Table:
+        """Read from the first backend that successfully returns the file."""
+        last_error: Optional[Exception] = None
+        for backend in self.backends:
+            try:
+                return backend.read_table(filepath)
+            except Exception as e:
+                last_error = e
+        raise last_error or FileNotFoundError(f"File not found in any backend: {filepath}")
 
 
 def create_storage(log_dir: str, s3_config: Optional[S3Config] = None) -> StorageBackend:
