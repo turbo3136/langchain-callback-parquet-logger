@@ -49,14 +49,19 @@ _TERMINAL_RETRIEVAL_EVENT_TYPES = {
 def _query_pending_responses(storage) -> "pd.DataFrame":
     """Read parquet files from storage and find responses with non-terminal status.
 
-    Uses ``run_id`` (= response_id) and ``event_type`` to determine which responses
-    are still pending.  A response is pending when its latest logged event_type is
-    NOT one of the terminal types (``background_retrieval_complete`` /
-    ``background_retrieval_error``).
+    Uses ``event_type`` to determine which responses are still pending.
+    A response is pending when its latest logged event_type is NOT one of the
+    terminal types (``background_retrieval_complete`` / ``background_retrieval_error``).
+
+    ``response_id`` is read from ``payload.data.response_id`` when present (current
+    schema where ``run_id`` is the LangChain UUID), falling back to the ``run_id``
+    column for backward compatibility with older log files written before this change.
 
     Returns:
         DataFrame with columns: response_id, custom_id
     """
+    import json as _json
+
     if pd is None:
         raise ImportError(
             "pandas is required for auto-discovery. Install with: pip install pandas"
@@ -78,7 +83,7 @@ def _query_pending_responses(storage) -> "pd.DataFrame":
             df = table.to_pandas()
             bg_df = df[df['event_type'].isin(_BACKGROUND_EVENT_TYPES)]
             if not bg_df.empty:
-                frames.append(bg_df[['run_id', 'custom_id', 'event_type', 'timestamp']])
+                frames.append(bg_df[['run_id', 'custom_id', 'event_type', 'timestamp', 'payload']])
         except Exception:
             continue
 
@@ -87,8 +92,20 @@ def _query_pending_responses(storage) -> "pd.DataFrame":
 
     all_df = pd.concat(frames, ignore_index=True)
 
-    # For each run_id (= response_id), find the latest event by timestamp
-    latest = all_df.sort_values('timestamp').groupby('run_id').last().reset_index()
+    # Extract the OpenAI response_id from payload.data.response_id.
+    # Current schema: run_id = LangChain UUID, data.response_id = OpenAI resp_xxx.
+    # Fallback: run_id = OpenAI resp_xxx (older log files written before this change).
+    def _extract_resp_id(row):
+        try:
+            resp_id = _json.loads(row['payload']).get('data', {}).get('response_id')
+            return resp_id or row['run_id']
+        except Exception:
+            return row['run_id']
+
+    all_df['effective_response_id'] = all_df.apply(_extract_resp_id, axis=1)
+
+    # For each response, find the latest event by timestamp
+    latest = all_df.sort_values('timestamp').groupby('effective_response_id').last().reset_index()
 
     # Keep only non-terminal entries (responses still pending)
     pending = latest[~latest['event_type'].isin(_TERMINAL_RETRIEVAL_EVENT_TYPES)]
@@ -97,7 +114,7 @@ def _query_pending_responses(storage) -> "pd.DataFrame":
         return pd.DataFrame(columns=['response_id', 'custom_id'])
 
     return pd.DataFrame({
-        'response_id': pending['run_id'].values,
+        'response_id': pending['effective_response_id'].values,
         'custom_id': pending['custom_id'].values,
     })
 
@@ -274,6 +291,14 @@ async def retrieve_background_responses(
         response_id = row[cc.response_id]
         custom_id = row.get(cc.custom_id, "")
 
+        # Use the original LangChain run_id/parent_run_id when available (captured by
+        # _BackgroundRunIdCapture in Batch.run()) so that retrieval events share the
+        # same top-level run_id column as llm_start/llm_end, enabling simple JOINs.
+        # Fall back to response_id for backward compat when called without Batch.
+        llm_run_id = row.get('run_id') or response_id
+        llm_parent_run_id = row.get('parent_run_id') or ''
+        tags = list(row.get('tags') or [])
+
         # Skip if already processed
         if response_id in processed_ids:
             if rc.return_results:
@@ -285,25 +310,26 @@ async def retrieve_background_responses(
                 }
             return None
 
-        def _log(event_type: str, data: dict):
+        def _log(event_type: str, data: dict, raw: Optional[dict] = None):
             """Log a background retrieval event using the standard SCHEMA format.
 
             Delegates to logger._log_event() so all entries go through the same
             code path as regular ParquetLogger events, including _safe_json_dumps().
+            ``raw`` is optional; for completed events it should be the full response dict.
             """
             if logger:
                 payload = {
                     "event_type": event_type,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "execution": {
-                        "run_id": response_id,
-                        "parent_run_id": "",
+                        "run_id": llm_run_id,
+                        "parent_run_id": llm_parent_run_id,
                         "custom_id": custom_id,
-                        "tags": [],
+                        "tags": tags,
                         "metadata": {}
                     },
                     "data": data,
-                    "raw": {}
+                    "raw": raw or {}
                 }
                 logger._log_event(payload)
 
@@ -361,7 +387,7 @@ async def retrieve_background_responses(
                     'error': last_error,
                     'error_type': 'retrieval_failed',
                     'attempts': rc.max_retries,
-                })
+                }, raw={'error': last_error})
                 failed_ids[response_id] = last_error
                 processed_ids.add(response_id)
                 if rc.return_results:
@@ -413,7 +439,7 @@ async def retrieve_background_responses(
                     'status': 'completed',
                     'retrieval_time': datetime.now(timezone.utc).isoformat(),
                     'poll_attempts': poll_attempt + 1,
-                })
+                }, raw=response_data)
                 processed_ids.add(response_id)
                 if rc.return_results:
                     return {'response_id': response_id, 'status': 'completed', 'openai_response': response_data, 'parsed_output': parsed_output, 'error': None}
@@ -428,7 +454,7 @@ async def retrieve_background_responses(
                     'error_type': response_status,
                     'openai_response': response_data,
                     'poll_attempts': poll_attempt + 1,
-                })
+                }, raw=response_data)
                 failed_ids[response_id] = error_msg
                 processed_ids.add(response_id)
                 if rc.return_results:
@@ -452,7 +478,7 @@ async def retrieve_background_responses(
             'error': error_msg,
             'error_type': 'poll_timeout',
             'poll_attempts': rc.max_poll_attempts,
-        })
+        }, raw={'error': error_msg})
         failed_ids[response_id] = error_msg
         processed_ids.add(response_id)
         if rc.return_results:

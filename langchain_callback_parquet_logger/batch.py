@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Type, TYPE_CHECKING
 
 import pandas as pd
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.runnables import RunnableLambda
 
 from .logger import ParquetLogger
@@ -62,6 +63,36 @@ def _try_extract_id_from_exception(exc: BaseException) -> Optional[str]:
     if id_match and status_match and status_match.group(1) in _OPENAI_PENDING_STATUSES:
         return id_match.group(1)
     return None
+
+
+class _BackgroundRunIdCapture(BaseCallbackHandler):
+    """Captures LangChain run_id/parent_run_id for OpenAI background responses.
+
+    Added alongside ParquetLogger in Batch.run() so that retrieval events can use
+    the same run_id as the original llm_start/llm_end events, enabling a simple
+    ``WHERE run_id = X`` join across all event types in Parquet.
+
+    Works with ``with_structured_output()`` because ``on_llm_end`` fires before
+    the parser raises ``ValueError`` for queued (empty-content) responses.
+    """
+
+    def __init__(self):
+        super().__init__()
+        # Maps OpenAI response_id → {run_id, parent_run_id}
+        self.response_to_run: Dict[str, dict] = {}
+
+    def on_llm_end(self, response, *, run_id, parent_run_id=None, **kwargs):
+        for gen_list in response.generations:
+            for gen in gen_list:
+                msg = getattr(gen, 'message', None) or gen
+                meta = getattr(msg, 'response_metadata', {}) or {}
+                if meta.get('status') in _OPENAI_PENDING_STATUSES:
+                    resp_id = meta.get('id')
+                    if resp_id:
+                        self.response_to_run[resp_id] = {
+                            'run_id': str(run_id or ''),
+                            'parent_run_id': str(parent_run_id or ''),
+                        }
 
 
 def _parse_from_openai_response(response_dict: dict, schema: Type) -> Optional[Any]:
@@ -307,14 +338,18 @@ class Batch:
         )
         self.local_path.mkdir(parents=True, exist_ok=True)
 
-        # Background response IDs captured during run() — response_id → custom_id
-        self._background_response_ids: Dict[str, str] = {}
+        # Background response IDs captured during run().
+        # Maps response_id → {custom_id, run_id, parent_run_id, tags}
+        self._background_response_ids: Dict[str, dict] = {}
         # Structured output schema from the last run() — applied during retrieve()
         self._last_structured_output: Optional[Type] = None
 
     @property
-    def pending_response_ids(self) -> Dict[str, str]:
-        """Background response IDs captured during the last run() call (response_id → custom_id)."""
+    def pending_response_ids(self) -> Dict[str, dict]:
+        """Background response IDs captured during the last run() call.
+
+        Returns a dict of ``response_id → {custom_id, run_id, parent_run_id, tags}``.
+        """
         return dict(self._background_response_ids)
 
     def _build_logger_metadata(self, llm_config: LLMConfig, batch_size: int) -> dict:
@@ -407,6 +442,10 @@ class Batch:
         )
         _effective_return_results = self.processing_config.return_results or _will_extract_ids
 
+        # Captures LangChain run_id/parent_run_id for each background response so that
+        # retrieval events use the same run_id as the original llm_start/llm_end events.
+        id_capture = _BackgroundRunIdCapture()
+
         with ParquetLogger(
             log_dir=str(self.local_path),
             buffer_size=self.processing_config.buffer_size,
@@ -415,7 +454,7 @@ class Batch:
             event_types=self.processing_config.event_types,
             s3_config=self.resolved_s3_config,
         ) as logger:
-            llm = llm_config.create_llm(callbacks=[logger])
+            llm = llm_config.create_llm(callbacks=[logger, id_capture])
             results = await _batch_run(
                 df, llm,
                 prompt_col=self.column_config.prompt,
@@ -473,7 +512,17 @@ class Batch:
                                     (row.get(self.column_config.config) or {}).get('tags', [])
                                 )
                             )
-                            self._background_response_ids[response_id] = custom_id
+                            # Include original LangChain run_id/parent_run_id (captured by
+                            # id_capture.on_llm_end) so retrieval events share the same
+                            # run_id as llm_start/llm_end for seamless Parquet joins.
+                            run_info = id_capture.response_to_run.get(response_id, {})
+                            tags = list((row.get(self.column_config.config) or {}).get('tags', []))
+                            self._background_response_ids[response_id] = {
+                                'custom_id': custom_id,
+                                'run_id': run_info.get('run_id', ''),
+                                'parent_run_id': run_info.get('parent_run_id', ''),
+                                'tags': tags,
+                            }
                     except Exception as exc:
                         warnings.warn(
                             f"response_id_extractor raised {type(exc).__name__} for a row "
@@ -519,9 +568,12 @@ class Batch:
             df = pd.DataFrame([
                 {
                     self.column_config.response_id: rid,
-                    self.column_config.custom_id: cid,
+                    self.column_config.custom_id: entry['custom_id'],
+                    'run_id': entry.get('run_id', ''),
+                    'parent_run_id': entry.get('parent_run_id', ''),
+                    'tags': entry.get('tags', []),
                 }
-                for rid, cid in self._background_response_ids.items()
+                for rid, entry in self._background_response_ids.items()
             ])
             count_desc = f"{len(df)} captured response(s)"
         else:

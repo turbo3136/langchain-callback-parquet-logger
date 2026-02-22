@@ -865,7 +865,7 @@ class TestBatch:
                 processing_config=ProcessingConfig(show_progress=False),
             )
             # Inject a fake response ID to trigger the retrieval path
-            batch._background_response_ids = {'resp_001': 'cid_001'}
+            batch._background_response_ids = {'resp_001': {'custom_id': 'cid_001', 'run_id': '', 'parent_run_id': '', 'tags': []}}
 
             captured_metadata = []
 
@@ -1091,7 +1091,7 @@ class TestBatch:
                 storage_config=StorageConfig(output_dir=tmpdir),
                 processing_config=ProcessingConfig(show_progress=False),
             )
-            batch._background_response_ids = {'resp_001': 'cid_001'}
+            batch._background_response_ids = {'resp_001': {'custom_id': 'cid_001', 'run_id': '', 'parent_run_id': '', 'tags': []}}
             batch._last_structured_output = Location
 
             with _patch(
@@ -1199,7 +1199,7 @@ async def test_run_captures_custom_id_from_config_tags():
 
     # Both IDs should have been captured with the correct custom_id values
     assert len(batch.pending_response_ids) == 2
-    custom_ids = set(batch.pending_response_ids.values())
+    custom_ids = {e['custom_id'] for e in batch.pending_response_ids.values()}
     assert custom_ids == {'user-001', 'user-002'}
 
 
@@ -1247,3 +1247,252 @@ async def test_retrieve_background_responses_includes_parsed_output():
     assert 'parsed_output' in results.columns
     assert results['parsed_output'].iloc[0] == {'city': 'Paris'}
     assert results['status'].iloc[0] == 'completed'
+
+
+# ---------------------------------------------------------------------------
+# New tests: run_id/parent_run_id/tags/raw flow through background retrieval
+# ---------------------------------------------------------------------------
+
+def test_background_run_id_capture_on_llm_end():
+    """Test that _BackgroundRunIdCapture.on_llm_end captures run_id and parent_run_id
+    when the LLM response contains a background (queued/in_progress) status."""
+    from langchain_callback_parquet_logger.batch import _BackgroundRunIdCapture
+    from unittest.mock import MagicMock
+    import uuid
+
+    capture = _BackgroundRunIdCapture()
+
+    run_id = uuid.uuid4()
+    parent_run_id = uuid.uuid4()
+
+    # Build a fake LLMResult with a background-status ChatGeneration
+    gen = MagicMock()
+    gen.message.response_metadata = {'id': 'resp_run_test001', 'status': 'queued'}
+    response = MagicMock()
+    response.generations = [[gen]]
+
+    capture.on_llm_end(response, run_id=run_id, parent_run_id=parent_run_id)
+
+    assert 'resp_run_test001' in capture.response_to_run
+    info = capture.response_to_run['resp_run_test001']
+    assert info['run_id'] == str(run_id)
+    assert info['parent_run_id'] == str(parent_run_id)
+
+    # Synchronous (completed) responses must NOT be captured
+    gen2 = MagicMock()
+    gen2.message.response_metadata = {'id': 'chatcmpl_sync', 'status': 'completed'}
+    response2 = MagicMock()
+    response2.generations = [[gen2]]
+
+    capture.on_llm_end(response2, run_id=uuid.uuid4())
+    assert 'chatcmpl_sync' not in capture.response_to_run
+
+
+@pytest.mark.asyncio
+async def test_run_stores_run_id_and_tags_in_background_ids():
+    """Test that Batch.run() stores run_id, parent_run_id, and tags in the
+    _background_response_ids dict alongside custom_id."""
+    call_count = 0
+
+    async def mock_ainvoke(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        return Mock(
+            response_metadata={'id': f'resp_rtag{call_count:03d}', 'status': 'in_progress'},
+            content='',
+        )
+
+    class MockChatOpenAI:
+        def __init__(self, **kwargs):
+            self.callbacks = kwargs.get('callbacks', [])
+            self.ainvoke = AsyncMock(side_effect=mock_ainvoke)
+
+    MockChatOpenAI.__name__ = 'ChatOpenAI'
+    MockChatOpenAI.__module__ = 'test_module'
+
+    df = pd.DataFrame({
+        'prompt': ['hello'],
+        'config': [with_tags(custom_id='run-tag-user')],
+    })
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        batch = Batch(
+            storage_config=StorageConfig(output_dir=tmpdir),
+            processing_config=ProcessingConfig(show_progress=False, return_results=True),
+        )
+        await batch.run(df, LLMConfig(llm_class=MockChatOpenAI, llm_kwargs={}))
+
+    assert len(batch._background_response_ids) == 1
+    entry = next(iter(batch._background_response_ids.values()))
+    assert entry['custom_id'] == 'run-tag-user'
+    # Tags should include the logger_custom_id tag from with_tags()
+    assert any('logger_custom_id' in t for t in entry['tags'])
+    # run_id is empty string here because MockChatOpenAI doesn't go through
+    # the real LangChain callback chain — just verify the key exists
+    assert 'run_id' in entry
+    assert 'parent_run_id' in entry
+
+
+def test_pending_response_ids_returns_full_dict():
+    """Test that pending_response_ids returns the full dict (response_id → entry dict)
+    rather than a simple string mapping."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        batch = Batch(
+            storage_config=StorageConfig(output_dir=tmpdir),
+            processing_config=ProcessingConfig(show_progress=False),
+        )
+        batch._background_response_ids = {
+            'resp_A': {'custom_id': 'cid-a', 'run_id': 'uuid-1', 'parent_run_id': '', 'tags': ['x']},
+            'resp_B': {'custom_id': 'cid-b', 'run_id': 'uuid-2', 'parent_run_id': '', 'tags': []},
+        }
+
+        ids = batch.pending_response_ids
+        assert set(ids.keys()) == {'resp_A', 'resp_B'}
+        assert ids['resp_A']['custom_id'] == 'cid-a'
+        assert ids['resp_A']['run_id'] == 'uuid-1'
+        assert ids['resp_A']['tags'] == ['x']
+        assert ids['resp_B']['custom_id'] == 'cid-b'
+
+
+@pytest.mark.asyncio
+async def test_retrieval_events_use_original_run_id():
+    """Test that retrieve_background_responses() uses the run_id column from the df
+    (the original LangChain UUID) as the execution.run_id in logged events."""
+    from langchain_callback_parquet_logger.background_retrieval import retrieve_background_responses
+    from langchain_callback_parquet_logger import RetrievalConfig
+
+    class FakeResponse:
+        status = 'completed'
+        output_text = None
+
+        def model_dump(self, **kwargs):
+            return {'status': 'completed'}
+
+    mock_client = AsyncMock()
+    mock_client.responses.retrieve = AsyncMock(return_value=FakeResponse())
+
+    df = pd.DataFrame({
+        'response_id': ['resp_run_link001'],
+        'custom_id': ['cid_run'],
+        'run_id': ['langchain-uuid-xyz'],
+        'parent_run_id': ['parent-uuid-abc'],
+        'tags': [['logger_custom_id:cid_run', 'env:test']],
+    })
+
+    logged_payloads = []
+
+    class CapturingLogger:
+        def _log_event(self, payload):
+            logged_payloads.append(payload)
+
+        def flush(self):
+            pass
+
+    await retrieve_background_responses(
+        df=df,
+        openai_client=mock_client,
+        logger=CapturingLogger(),
+        retrieval_config=RetrievalConfig(show_progress=False, return_results=True, poll_interval=0),
+    )
+
+    assert len(logged_payloads) >= 2  # attempt + complete
+    for p in logged_payloads:
+        assert p['execution']['run_id'] == 'langchain-uuid-xyz', (
+            f"Expected run_id='langchain-uuid-xyz', got {p['execution']['run_id']!r}"
+        )
+        assert p['execution']['parent_run_id'] == 'parent-uuid-abc'
+        assert 'logger_custom_id:cid_run' in p['execution']['tags']
+
+    # The complete event should have raw populated with response_data
+    complete_events = [p for p in logged_payloads if p['event_type'] == 'background_retrieval_complete']
+    assert len(complete_events) == 1
+    assert isinstance(complete_events[0]['raw'], dict)
+    assert complete_events[0]['raw']  # non-empty
+
+
+@pytest.mark.asyncio
+async def test_retrieval_complete_has_raw_response_data():
+    """Test that background_retrieval_complete events have raw populated with
+    the full serialized OpenAI response, matching the llm_end raw convention."""
+    from langchain_callback_parquet_logger.background_retrieval import retrieve_background_responses
+    from langchain_callback_parquet_logger import RetrievalConfig
+
+    class FakeResponse:
+        status = 'completed'
+        output_text = 'hello'
+
+        def model_dump(self, **kwargs):
+            return {'status': 'completed', 'output': [], 'output_text': 'hello'}
+
+    mock_client = AsyncMock()
+    mock_client.responses.retrieve = AsyncMock(return_value=FakeResponse())
+
+    df = pd.DataFrame({
+        'response_id': ['resp_raw_test'],
+        'custom_id': ['raw_cid'],
+    })
+
+    logged_payloads = []
+
+    class CapturingLogger:
+        def _log_event(self, payload):
+            logged_payloads.append(payload)
+
+        def flush(self):
+            pass
+
+    await retrieve_background_responses(
+        df=df,
+        openai_client=mock_client,
+        logger=CapturingLogger(),
+        retrieval_config=RetrievalConfig(show_progress=False, return_results=True, poll_interval=0),
+    )
+
+    complete_events = [p for p in logged_payloads if p['event_type'] == 'background_retrieval_complete']
+    assert len(complete_events) == 1
+    raw = complete_events[0]['raw']
+    assert isinstance(raw, dict)
+    assert raw.get('status') == 'completed'
+    assert raw.get('output_text') == 'hello'
+
+
+def test_query_pending_responses_reads_response_id_from_payload():
+    """Test that _query_pending_responses() extracts response_id from payload.data
+    rather than the run_id column (which now holds the LangChain UUID)."""
+    import json
+    from langchain_callback_parquet_logger.background_retrieval import _query_pending_responses
+    from langchain_callback_parquet_logger.storage import LocalStorage
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Write a fake Parquet file with run_id = LangChain UUID and
+        # payload.data.response_id = OpenAI response_id
+        langchain_uuid = 'lc-uuid-abc123'
+        openai_resp_id = 'resp_openai_xyz'
+
+        payload = json.dumps({
+            'event_type': 'background_retrieval_attempt',
+            'data': {'response_id': openai_resp_id},
+            'execution': {'run_id': langchain_uuid, 'custom_id': 'cid-test'},
+        })
+
+        table = pa.table({
+            'timestamp': pa.array([1], type=pa.int64()),
+            'run_id': [langchain_uuid],
+            'parent_run_id': [''],
+            'custom_id': ['cid-test'],
+            'event_type': ['background_retrieval_attempt'],
+            'logger_metadata': ['{}'],
+            'payload': [payload],
+        })
+        pq.write_table(table, f'{tmpdir}/test.parquet')
+
+        storage = LocalStorage(tmpdir)
+        result = _query_pending_responses(storage)
+
+    assert not result.empty
+    assert result['response_id'].iloc[0] == openai_resp_id, (
+        "Should use response_id from payload, not the LangChain run_id"
+    )
+    assert result['custom_id'].iloc[0] == 'cid-test'
