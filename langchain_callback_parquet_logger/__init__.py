@@ -22,7 +22,7 @@ except ImportError:
     retrieve_background_responses = None
 
 
-__version__ = "3.3.0a7"
+__version__ = "4.0.0"
 
 __all__ = [
     # Core
