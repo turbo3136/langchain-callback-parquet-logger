@@ -517,12 +517,31 @@ class Batch:
                             # run_id as llm_start/llm_end for seamless Parquet joins.
                             run_info = id_capture.response_to_run.get(response_id, {})
                             tags = list((row.get(self.column_config.config) or {}).get('tags', []))
-                            self._background_response_ids[response_id] = {
+                            entry = {
                                 'custom_id': custom_id,
                                 'run_id': run_info.get('run_id', ''),
                                 'parent_run_id': run_info.get('parent_run_id', ''),
                                 'tags': tags,
                             }
+                            self._background_response_ids[response_id] = entry
+                            # Log a queued event so Parquet auto-discovery can find
+                            # this response even if retrieve() is never called.
+                            logger._log_event({
+                                "event_type": "background_retrieval_queued",
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "execution": {
+                                    "run_id": entry['run_id'] or response_id,
+                                    "parent_run_id": entry['parent_run_id'],
+                                    "custom_id": custom_id,
+                                    "tags": tags,
+                                    "metadata": {}
+                                },
+                                "data": {
+                                    "response_id": response_id,
+                                    "custom_id": custom_id,
+                                },
+                                "raw": {}
+                            })
                     except Exception as exc:
                         warnings.warn(
                             f"response_id_extractor raised {type(exc).__name__} for a row "
@@ -542,6 +561,7 @@ class Batch:
         self,
         openai_client=None,
         retrieval_config: Optional[RetrievalConfig] = None,
+        s3_path: Optional[str] = None,
     ) -> Optional[pd.DataFrame]:
         """
         Retrieve background responses and log them to the same Parquet location.
@@ -553,18 +573,32 @@ class Batch:
         Args:
             openai_client: OpenAI async client. Auto-creates ``AsyncOpenAI()`` if None.
             retrieval_config: Polling and execution settings.
+            s3_path: Optional S3 URI (e.g. ``"s3://bucket/prefix/"``). When provided,
+                pending responses are discovered from that S3 location instead of the
+                batch's own storage. Useful for cross-process resume without a live
+                ``Batch`` object.
 
         Returns:
             DataFrame with columns: response_id, status, openai_response, error
             (or None if retrieval_config.return_results=False).
         """
-        from .background_retrieval import retrieve_background_responses, _query_pending_responses
+        from .background_retrieval import retrieve_background_responses, _query_pending_responses, _parse_s3_uri
         from .storage import LocalStorage, S3Storage
 
         rc = retrieval_config or self.retrieval_config
 
         # Build df from in-memory captured IDs, or auto-discover from storage
-        if self._background_response_ids:
+        if s3_path is not None:
+            # s3_path overrides all other discovery — read pending from S3
+            bucket, prefix = _parse_s3_uri(s3_path)
+            read_storage = S3Storage(S3Config(bucket=bucket, prefix=prefix))
+            df = _query_pending_responses(read_storage)
+            if df.empty:
+                if rc.show_progress:
+                    print("No pending responses found in S3.")
+                return pd.DataFrame() if rc.return_results else None
+            count_desc = f"{len(df)} auto-discovered response(s) from S3"
+        elif self._background_response_ids:
             df = pd.DataFrame([
                 {
                     self.column_config.response_id: rid,

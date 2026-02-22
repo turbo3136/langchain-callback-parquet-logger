@@ -19,10 +19,11 @@ from langchain_callback_parquet_logger.background_retrieval import (
     retrieve_background_responses,
     save_checkpoint,
     _query_pending_responses,
+    _parse_s3_uri,
     _BACKGROUND_EVENT_TYPES,
     _TERMINAL_RETRIEVAL_EVENT_TYPES,
 )
-from langchain_callback_parquet_logger.config import StorageConfig, JobConfig, RetrievalConfig
+from langchain_callback_parquet_logger.config import StorageConfig, JobConfig, RetrievalConfig, S3Config
 from langchain_callback_parquet_logger.storage import LocalStorage
 from langchain_callback_parquet_logger.logger import SCHEMA
 
@@ -625,6 +626,149 @@ async def test_source_s3_requires_s3_config():
             retrieval_config=RetrievalConfig(source="s3", show_progress=False),
             openai_client=client,
         )
+
+
+# --- _parse_s3_uri tests ---
+
+def test_parse_s3_uri_basic():
+    """Standard S3 URI with trailing slash."""
+    assert _parse_s3_uri("s3://my-bucket/path/to/logs/") == ("my-bucket", "path/to/logs/")
+
+
+def test_parse_s3_uri_no_trailing_slash():
+    """S3 URI without trailing slash."""
+    assert _parse_s3_uri("s3://my-bucket/path/to/logs") == ("my-bucket", "path/to/logs")
+
+
+def test_parse_s3_uri_root_bucket():
+    """S3 URI with bucket only (no prefix)."""
+    assert _parse_s3_uri("s3://my-bucket") == ("my-bucket", "")
+
+
+def test_parse_s3_uri_invalid():
+    """Non-s3:// URI raises ValueError."""
+    with pytest.raises(ValueError, match="s3://"):
+        _parse_s3_uri("https://bucket/prefix/")
+
+
+# --- _query_pending_responses enriched return tests ---
+
+def test_query_pending_responses_returns_enriched_columns():
+    """_query_pending_responses() returns run_id, parent_run_id, tags alongside response_id."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        logger = ParquetLogger(log_dir=tmpdir, buffer_size=10)
+
+        logger._add_entry({
+            'timestamp': datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+            'run_id': 'lc-uuid-001',
+            'parent_run_id': 'lc-parent-001',
+            'custom_id': 'cid-enriched',
+            'event_type': 'background_retrieval_queued',
+            'logger_metadata': '{}',
+            'payload': json.dumps({
+                'event_type': 'background_retrieval_queued',
+                'timestamp': '2026-01-01T00:00:00+00:00',
+                'execution': {
+                    'run_id': 'lc-uuid-001',
+                    'parent_run_id': 'lc-parent-001',
+                    'custom_id': 'cid-enriched',
+                    'tags': ['tag1', 'logger_custom_id:cid-enriched'],
+                    'metadata': {}
+                },
+                'data': {'response_id': 'resp_enrich_001', 'custom_id': 'cid-enriched'},
+                'raw': {}
+            })
+        })
+        logger.flush()
+
+        storage = LocalStorage(tmpdir)
+        result = _query_pending_responses(storage)
+
+        assert not result.empty
+        assert 'run_id' in result.columns
+        assert 'parent_run_id' in result.columns
+        assert 'tags' in result.columns
+
+        row = result.iloc[0]
+        assert row['response_id'] == 'resp_enrich_001'
+        assert row['run_id'] == 'lc-uuid-001'
+        assert row['parent_run_id'] == 'lc-parent-001'
+        assert 'tag1' in row['tags']
+
+
+def test_query_pending_responses_no_compat_fallback():
+    """Events with no data.response_id in payload are excluded (no fallback to run_id column)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Write a background event whose payload has no data.response_id
+        table = pa.table({
+            'timestamp': pa.array([1000000000000], type=pa.int64()),
+            'run_id': ['resp_old_format'],
+            'parent_run_id': [''],
+            'custom_id': ['cid-old'],
+            'event_type': ['background_retrieval_attempt'],
+            'logger_metadata': ['{}'],
+            'payload': [json.dumps({
+                'event_type': 'background_retrieval_attempt',
+                'data': {},  # No response_id — simulates malformed/old event
+                'execution': {'run_id': 'resp_old_format', 'custom_id': 'cid-old'},
+            })],
+        })
+        pq.write_table(table, f'{tmpdir}/test.parquet')
+
+        storage = LocalStorage(tmpdir)
+        result = _query_pending_responses(storage)
+
+        # Should be excluded — no fallback to run_id column
+        assert result.empty
+
+
+@pytest.mark.asyncio
+async def test_retrieve_background_responses_s3_path_auto_discovers():
+    """s3_path causes S3Storage to be used for auto-discovery."""
+    from unittest.mock import patch
+
+    pending_df = pd.DataFrame({
+        'response_id': ['resp_s3_001'],
+        'custom_id': ['cid_s3_001'],
+        'run_id': ['lc-uuid-s3'],
+        'parent_run_id': [''],
+        'tags': [[]],
+    })
+
+    with patch(
+        'langchain_callback_parquet_logger.background_retrieval._query_pending_responses',
+        return_value=pending_df
+    ) as mock_query, patch(
+        'langchain_callback_parquet_logger.background_retrieval.S3Storage'
+    ) as MockS3Storage:
+        client = AsyncMock()
+        client.responses.retrieve = AsyncMock(
+            return_value=MagicMock(model_dump=lambda **kwargs: {'id': 'resp_s3_001', 'status': 'completed'})
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with ParquetLogger(log_dir=tmpdir, buffer_size=1) as logger:
+                results = await retrieve_background_responses(
+                    s3_path="s3://test-bucket/my/prefix/",
+                    openai_client=client,
+                    logger=logger,
+                    retrieval_config=RetrievalConfig(show_progress=False),
+                )
+
+    # S3Storage was instantiated with S3Config(bucket='test-bucket', prefix='my/prefix/')
+    MockS3Storage.assert_called_once()
+    s3_cfg_arg = MockS3Storage.call_args[0][0]
+    assert isinstance(s3_cfg_arg, S3Config)
+    assert s3_cfg_arg.bucket == 'test-bucket'
+    assert s3_cfg_arg.prefix == 'my/prefix/'
+
+    # _query_pending_responses was called with the S3Storage instance
+    mock_query.assert_called_once_with(MockS3Storage.return_value)
+
+    assert results is not None
+    assert len(results) == 1
+    assert results.iloc[0]['response_id'] == 'resp_s3_001'
+    assert results.iloc[0]['status'] == 'completed'
 
 
 if __name__ == "__main__":

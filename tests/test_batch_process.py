@@ -11,7 +11,7 @@ from unittest.mock import patch, Mock, AsyncMock, MagicMock, PropertyMock
 from langchain_callback_parquet_logger import (
     Batch, BatchOutcome, with_tags,
     LLMConfig, JobConfig, StorageConfig, ProcessingConfig,
-    ColumnConfig, S3Config
+    ColumnConfig, S3Config, RetrievalConfig
 )
 
 
@@ -1496,3 +1496,98 @@ def test_query_pending_responses_reads_response_id_from_payload():
         "Should use response_id from payload, not the LangChain run_id"
     )
     assert result['custom_id'].iloc[0] == 'cid-test'
+
+
+@pytest.mark.asyncio
+async def test_batch_run_logs_queued_event():
+    """Batch.run() logs a background_retrieval_queued event for each background response."""
+    import json
+    from langchain_callback_parquet_logger.background_retrieval import _BACKGROUND_EVENT_TYPES
+
+    call_count = 0
+
+    async def mock_ainvoke(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        return Mock(
+            response_metadata={'id': f'resp_queued{call_count:03d}', 'status': 'in_progress'},
+            content='',
+        )
+
+    class MockChatOpenAI:
+        def __init__(self, **kwargs):
+            self.callbacks = kwargs.get('callbacks', [])
+            self.ainvoke = AsyncMock(side_effect=mock_ainvoke)
+
+    MockChatOpenAI.__name__ = 'ChatOpenAI'
+    MockChatOpenAI.__module__ = 'test_module'
+
+    df = pd.DataFrame({
+        'prompt': ['hello', 'world'],
+        'config': [with_tags(custom_id='q1'), with_tags(custom_id='q2')],
+    })
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        batch = Batch(
+            storage_config=StorageConfig(output_dir=tmpdir, path_template=""),
+            processing_config=ProcessingConfig(show_progress=False, return_results=True),
+        )
+        await batch.run(df, LLMConfig(llm_class=MockChatOpenAI, llm_kwargs={}))
+        batch._logger_flush_for_test = True  # ensure parquet written (logger context exited)
+
+        log_df = pd.read_parquet(tmpdir)
+
+    # Check background_retrieval_queued events were written
+    queued_events = log_df[log_df['event_type'] == 'background_retrieval_queued']
+    assert len(queued_events) == 2, f"Expected 2 queued events, got {len(queued_events)}"
+
+    # Each queued event should have the correct response_id in payload.data
+    for _, row in queued_events.iterrows():
+        payload = json.loads(row['payload'])
+        resp_id = payload['data']['response_id']
+        assert resp_id.startswith('resp_queued'), f"Unexpected response_id: {resp_id}"
+        # response_id must be in _background_response_ids
+        assert resp_id in batch._background_response_ids
+
+
+@pytest.mark.asyncio
+async def test_batch_retrieve_s3_path_uses_s3_storage():
+    """Batch.retrieve(s3_path=...) reads pending responses from S3Storage."""
+    pending_df = pd.DataFrame({
+        'response_id': ['resp_s3_resume'],
+        'custom_id': ['cid_s3'],
+        'run_id': ['lc-uuid'],
+        'parent_run_id': [''],
+        'tags': [[]],
+    })
+
+    with patch(
+        'langchain_callback_parquet_logger.background_retrieval._query_pending_responses',
+        return_value=pending_df
+    ) as mock_query, patch(
+        'langchain_callback_parquet_logger.storage.S3Storage'
+    ) as MockS3Storage, patch(
+        'langchain_callback_parquet_logger.background_retrieval.retrieve_background_responses',
+        new_callable=AsyncMock,
+        return_value=pd.DataFrame({'response_id': ['resp_s3_resume'], 'status': ['completed'],
+                                   'openai_response': [{}], 'error': [None]}),
+    ):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch = Batch(
+                storage_config=StorageConfig(output_dir=tmpdir, path_template=""),
+                processing_config=ProcessingConfig(show_progress=False),
+            )
+            # No in-memory IDs captured (simulates cross-process resume)
+            results = await batch.retrieve(
+                s3_path="s3://my-bucket/my/prefix/",
+                retrieval_config=RetrievalConfig(show_progress=False),
+            )
+
+    # S3Storage was created with the right bucket and prefix
+    MockS3Storage.assert_called_once()
+    s3_cfg_arg = MockS3Storage.call_args[0][0]
+    assert s3_cfg_arg.bucket == 'my-bucket'
+    assert s3_cfg_arg.prefix == 'my/prefix/'
+
+    # _query_pending_responses was called with the S3Storage instance
+    mock_query.assert_called_once_with(MockS3Storage.return_value)

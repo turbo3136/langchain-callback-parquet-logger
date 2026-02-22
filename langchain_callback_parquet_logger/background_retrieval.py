@@ -10,7 +10,7 @@ import random
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 import warnings
 
 try:
@@ -24,7 +24,7 @@ except ImportError:
     openai = None
 
 from .logger import ParquetLogger
-from .config import StorageConfig, JobConfig, RetrievalConfig, ColumnConfig
+from .config import StorageConfig, JobConfig, RetrievalConfig, ColumnConfig, S3Config
 from .storage import create_storage, LocalStorage, S3Storage
 
 # OpenAI response statuses that mean "done, stop polling"
@@ -32,8 +32,9 @@ _TERMINAL_STATUSES = {"completed", "failed", "cancelled", "expired"}
 # Statuses that indicate the response is still being processed
 _PENDING_STATUSES = {"in_progress", "queued", "processing"}
 
-# Background retrieval event types (all share the same run_id = response_id)
+# Background retrieval event types (run_id = LangChain UUID; response_id stored in data.response_id)
 _BACKGROUND_EVENT_TYPES = {
+    'background_retrieval_queued',     # logged by Batch.run() when a background response is detected
     'background_retrieval_attempt',
     'background_retrieval_pending',
     'background_retrieval_complete',
@@ -53,14 +54,16 @@ def _query_pending_responses(storage) -> "pd.DataFrame":
     A response is pending when its latest logged event_type is NOT one of the
     terminal types (``background_retrieval_complete`` / ``background_retrieval_error``).
 
-    ``response_id`` is read from ``payload.data.response_id`` when present (current
-    schema where ``run_id`` is the LangChain UUID), falling back to the ``run_id``
-    column for backward compatibility with older log files written before this change.
+    ``response_id`` is read from ``payload.data.response_id`` (current schema where
+    ``run_id`` is the LangChain UUID). Events without ``data.response_id`` in the
+    payload are excluded.
 
     Returns:
-        DataFrame with columns: response_id, custom_id
+        DataFrame with columns: response_id, custom_id, run_id, parent_run_id, tags
     """
     import json as _json
+
+    _EMPTY = ['response_id', 'custom_id', 'run_id', 'parent_run_id', 'tags']
 
     if pd is None:
         raise ImportError(
@@ -71,10 +74,10 @@ def _query_pending_responses(storage) -> "pd.DataFrame":
         files = storage.list_files()
     except Exception as e:
         warnings.warn(f"Failed to list files from storage: {e}")
-        return pd.DataFrame(columns=['response_id', 'custom_id'])
+        return pd.DataFrame(columns=_EMPTY)
 
     if not files:
-        return pd.DataFrame(columns=['response_id', 'custom_id'])
+        return pd.DataFrame(columns=_EMPTY)
 
     frames = []
     for f in files:
@@ -83,26 +86,37 @@ def _query_pending_responses(storage) -> "pd.DataFrame":
             df = table.to_pandas()
             bg_df = df[df['event_type'].isin(_BACKGROUND_EVENT_TYPES)]
             if not bg_df.empty:
-                frames.append(bg_df[['run_id', 'custom_id', 'event_type', 'timestamp', 'payload']])
+                frames.append(bg_df[['run_id', 'parent_run_id', 'custom_id', 'event_type', 'timestamp', 'payload']])
         except Exception:
             continue
 
     if not frames:
-        return pd.DataFrame(columns=['response_id', 'custom_id'])
+        return pd.DataFrame(columns=_EMPTY)
 
     all_df = pd.concat(frames, ignore_index=True)
 
-    # Extract the OpenAI response_id from payload.data.response_id.
-    # Current schema: run_id = LangChain UUID, data.response_id = OpenAI resp_xxx.
-    # Fallback: run_id = OpenAI resp_xxx (older log files written before this change).
-    def _extract_resp_id(row):
+    # Extract OpenAI response_id and tags from payload JSON.
+    # run_id = LangChain UUID (top-level column); data.response_id = OpenAI resp_xxx.
+    # Events without data.response_id are excluded (empty string → filtered below).
+    def _extract_resp_id_and_tags(row) -> "pd.Series":
         try:
-            resp_id = _json.loads(row['payload']).get('data', {}).get('response_id')
-            return resp_id or row['run_id']
+            parsed = _json.loads(row['payload'])
+            resp_id = parsed.get('data', {}).get('response_id') or ''
+            tags = parsed.get('execution', {}).get('tags', []) or []
         except Exception:
-            return row['run_id']
+            resp_id = ''
+            tags = []
+        return pd.Series({'effective_response_id': resp_id, 'extracted_tags': tags})
 
-    all_df['effective_response_id'] = all_df.apply(_extract_resp_id, axis=1)
+    extracted = all_df.apply(_extract_resp_id_and_tags, axis=1)
+    all_df['effective_response_id'] = extracted['effective_response_id']
+    all_df['extracted_tags'] = extracted['extracted_tags']
+
+    # Drop rows with no response_id (not background retrieval events we care about)
+    all_df = all_df[all_df['effective_response_id'] != '']
+
+    if all_df.empty:
+        return pd.DataFrame(columns=_EMPTY)
 
     # For each response, find the latest event by timestamp
     latest = all_df.sort_values('timestamp').groupby('effective_response_id').last().reset_index()
@@ -111,12 +125,36 @@ def _query_pending_responses(storage) -> "pd.DataFrame":
     pending = latest[~latest['event_type'].isin(_TERMINAL_RETRIEVAL_EVENT_TYPES)]
 
     if pending.empty:
-        return pd.DataFrame(columns=['response_id', 'custom_id'])
+        return pd.DataFrame(columns=_EMPTY)
 
     return pd.DataFrame({
         'response_id': pending['effective_response_id'].values,
         'custom_id': pending['custom_id'].values,
+        'run_id': pending['run_id'].values,
+        'parent_run_id': pending['parent_run_id'].values,
+        'tags': pending['extracted_tags'].values,
     })
+
+
+def _parse_s3_uri(uri: str) -> Tuple[str, str]:
+    """Parse an S3 URI into (bucket, prefix).
+
+    Examples::
+
+        >>> _parse_s3_uri("s3://my-bucket/path/to/logs/")
+        ('my-bucket', 'path/to/logs/')
+        >>> _parse_s3_uri("s3://my-bucket")
+        ('my-bucket', '')
+    """
+    if not uri.startswith("s3://"):
+        raise ValueError(f"Invalid S3 URI (must start with 's3://'): {uri!r}")
+    rest = uri[5:]
+    parts = rest.split("/", 1)
+    bucket = parts[0]
+    if not bucket:
+        raise ValueError(f"S3 URI has no bucket: {uri!r}")
+    prefix = parts[1] if len(parts) > 1 else ""
+    return bucket, prefix
 
 
 async def retrieve_background_responses(
@@ -128,6 +166,7 @@ async def retrieve_background_responses(
     retrieval_config: Optional[RetrievalConfig] = None,
     column_config: Optional[ColumnConfig] = None,
     response_parser=None,
+    s3_path: Optional[str] = None,
 ) -> Optional["pd.DataFrame"]:
     """
     Retrieve background responses from OpenAI and log them to Parquet.
@@ -137,15 +176,17 @@ async def retrieve_background_responses(
     ``background_retrieval_pending`` event and the final outcome as either
     ``background_retrieval_complete`` or ``background_retrieval_error``.
 
-    All log entries follow the standard SCHEMA (same as ParquetLogger) with
-    ``run_id`` set to the OpenAI ``response_id`` for easy top-level querying.
+    **S3 resume mode** (simplest for cross-process resume):
+        Pass ``s3_path="s3://bucket/prefix/"`` to auto-discover pending responses
+        from S3 and write new retrieval events back to the same S3 location.
+        No ``storage_config`` or ``job_config`` needed.
 
     **Auto-discovery mode** (default when no ``df`` is supplied):
         Pass ``storage_config`` (and optionally ``job_config``) to point the retriever
         at the same storage location used by ``batch_process()``.  The retriever reads
         existing parquet files, finds every response whose latest logged event is
-        non-terminal (``background_retrieval_attempt`` or ``background_retrieval_pending``),
-        and retries only those.
+        non-terminal (``background_retrieval_attempt``, ``background_retrieval_pending``,
+        or ``background_retrieval_queued``), and retries only those.
 
     **Explicit mode** (pass a ``df`` directly):
         Provide a DataFrame with ``response_id`` and ``custom_id`` columns (or
@@ -153,11 +194,11 @@ async def retrieve_background_responses(
 
     Args:
         df: Optional DataFrame containing response IDs to retrieve.  If omitted,
-            ``storage_config`` must be provided and responses are auto-discovered
-            from existing log files.
+            ``storage_config`` or ``s3_path`` must be provided and responses are
+            auto-discovered from existing log files.
         openai_client: Initialized OpenAI async client (created automatically if None)
         logger: Optional ParquetLogger instance for logging.  Auto-created from
-            ``storage_config`` when ``df`` is None and no logger is supplied.
+            ``storage_config`` or ``s3_path`` when no logger is supplied.
         storage_config: StorageConfig used to locate existing log files for
             auto-discovery and to write new log entries.
         job_config: Optional JobConfig used to resolve the full storage path (same
@@ -169,10 +210,21 @@ async def retrieve_background_responses(
         column_config: Optional ColumnConfig specifying which DataFrame columns hold
             the response_id and custom_id values.  Defaults to ``ColumnConfig()``
             (columns named "response_id" and "custom_id").
+        s3_path: Optional S3 URI (e.g. ``"s3://my-bucket/path/to/logs/"``).  When
+            provided, pending responses are auto-discovered from that S3 location and
+            new retrieval events are written back there.  Takes precedence over
+            ``storage_config``-based discovery when ``df`` is None.
 
     Returns:
         DataFrame with retrieval results if rc.return_results=True, else None.
         Result columns: response_id, status, openai_response, error
+
+    Example — S3 resume (cross-process)::
+
+        >>> results = await retrieve_background_responses(
+        ...     s3_path="s3://my-bucket/jobs/research/",
+        ...     openai_client=client,
+        ... )
 
     Example — auto-discovery::
 
@@ -209,6 +261,26 @@ async def retrieve_background_responses(
     # Resolve configuration objects
     rc = retrieval_config or RetrievalConfig()
     cc = column_config or ColumnConfig()
+
+    # --- S3 path shortcut (pre-process before standard auto-discovery) ---
+    if s3_path is not None:
+        import tempfile
+        bucket, prefix = _parse_s3_uri(s3_path)
+        s3_cfg = S3Config(bucket=bucket, prefix=prefix)
+        if df is None:
+            read_storage = S3Storage(s3_cfg)
+            df = _query_pending_responses(read_storage)
+            if df.empty:
+                if rc.show_progress:
+                    print("No pending responses found in S3.")
+                return pd.DataFrame() if rc.return_results else None
+            if rc.show_progress:
+                print(f"Auto-discovered {len(df)} pending response(s) from S3.")
+        if logger is None:
+            logger = ParquetLogger(
+                log_dir=tempfile.mkdtemp(prefix="bgretrieval_"),
+                s3_config=s3_cfg,
+            )
 
     # --- Auto-discovery mode ---
     if df is None:
