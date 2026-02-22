@@ -562,6 +562,7 @@ class Batch:
         openai_client=None,
         retrieval_config: Optional[RetrievalConfig] = None,
         s3_path: Optional[str] = None,
+        df: Optional[pd.DataFrame] = None,
     ) -> Optional[pd.DataFrame]:
         """
         Retrieve background responses and log them to the same Parquet location.
@@ -577,6 +578,11 @@ class Batch:
                 pending responses are discovered from that S3 location instead of the
                 batch's own storage. Useful for cross-process resume without a live
                 ``Batch`` object.
+            df: Optional DataFrame of response IDs to retrieve directly, bypassing all
+                auto-discovery. Required column: ``response_id`` (name respects
+                ``column_config.response_id``). Optional columns: ``custom_id``,
+                ``run_id``, ``parent_run_id``, ``tags``. Takes priority over all other
+                discovery paths including ``s3_path`` and in-memory IDs.
 
         Returns:
             DataFrame with columns: response_id, status, openai_response, error
@@ -587,8 +593,10 @@ class Batch:
 
         rc = retrieval_config or self.retrieval_config
 
-        # Build df from in-memory captured IDs, or auto-discover from storage
-        if s3_path is not None:
+        # Build df from explicit input, in-memory IDs, or auto-discovery
+        if df is not None:
+            count_desc = f"{len(df)} response(s) from provided DataFrame"
+        elif s3_path is not None:
             # s3_path overrides all other discovery — read pending from S3
             bucket, prefix = _parse_s3_uri(s3_path)
             read_storage = S3Storage(S3Config(bucket=bucket, prefix=prefix))

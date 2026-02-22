@@ -1591,3 +1591,83 @@ async def test_batch_retrieve_s3_path_uses_s3_storage():
 
     # _query_pending_responses was called with the S3Storage instance
     mock_query.assert_called_once_with(MockS3Storage.return_value)
+
+
+@pytest.mark.asyncio
+async def test_batch_retrieve_explicit_df():
+    """Batch.retrieve(df=...) passes the df directly to retrieve_background_responses."""
+    explicit_df = pd.DataFrame({
+        'response_id': ['resp_explicit_001', 'resp_explicit_002'],
+        'custom_id': ['cid_001', 'cid_002'],
+    })
+
+    captured = {}
+
+    with patch(
+        'langchain_callback_parquet_logger.background_retrieval.retrieve_background_responses',
+        new_callable=AsyncMock,
+    ) as mock_retrieve:
+        mock_retrieve.return_value = pd.DataFrame({
+            'response_id': ['resp_explicit_001', 'resp_explicit_002'],
+            'status': ['completed', 'completed'],
+            'openai_response': [{}, {}],
+            'error': [None, None],
+        })
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch = Batch(
+                storage_config=StorageConfig(output_dir=tmpdir, path_template=""),
+                processing_config=ProcessingConfig(show_progress=False),
+            )
+            results = await batch.retrieve(
+                df=explicit_df,
+                retrieval_config=RetrievalConfig(show_progress=False),
+            )
+
+    # retrieve_background_responses was called with the explicit df
+    mock_retrieve.assert_called_once()
+    passed_df = mock_retrieve.call_args.kwargs['df']
+    assert list(passed_df['response_id']) == ['resp_explicit_001', 'resp_explicit_002']
+
+    assert results is not None
+    assert len(results) == 2
+
+
+@pytest.mark.asyncio
+async def test_batch_retrieve_explicit_df_takes_priority_over_memory():
+    """Explicit df takes priority over in-memory _background_response_ids."""
+    explicit_df = pd.DataFrame({
+        'response_id': ['resp_from_df'],
+        'custom_id': ['cid_df'],
+    })
+
+    with patch(
+        'langchain_callback_parquet_logger.background_retrieval.retrieve_background_responses',
+        new_callable=AsyncMock,
+        return_value=pd.DataFrame({
+            'response_id': ['resp_from_df'],
+            'status': ['completed'],
+            'openai_response': [{}],
+            'error': [None],
+        }),
+    ) as mock_retrieve:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch = Batch(
+                storage_config=StorageConfig(output_dir=tmpdir, path_template=""),
+                processing_config=ProcessingConfig(show_progress=False),
+            )
+            # Populate in-memory IDs with a different response
+            batch._background_response_ids = {
+                'resp_from_memory': {'custom_id': 'cid_mem', 'run_id': '', 'parent_run_id': '', 'tags': []}
+            }
+
+            await batch.retrieve(
+                df=explicit_df,
+                retrieval_config=RetrievalConfig(show_progress=False),
+            )
+
+    # The df passed to retrieve_background_responses should be the explicit one (not memory)
+    passed_df = mock_retrieve.call_args.kwargs['df']
+    assert list(passed_df['response_id']) == ['resp_from_df'], (
+        "Expected df IDs, got memory IDs"
+    )
