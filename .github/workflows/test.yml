@@ -30,4 +30,4 @@ jobs:
     
     - name: Check package installation
       run: |
-        python -c "from langchain_callback_parquet_logger import ParquetLogger, with_tags, batch_run; print('Import successful')"
+        python -c "from langchain_callback_parquet_logger import ParquetLogger, with_tags, Batch; print('Import successful')"

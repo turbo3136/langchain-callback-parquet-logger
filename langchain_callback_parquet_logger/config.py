@@ -66,9 +66,9 @@ class ProcessingConfig:
     buffer_size: int = 1000
     show_progress: bool = True
     return_exceptions: bool = True
-    return_results: bool = False
+    return_results: bool = True
     event_types: Optional[List[str]] = None
-    partition_on: Optional[Literal["date"]] = "date"
+    partition_on: Optional[Union[Literal["date", "event_type"], List[Literal["date", "event_type"]]]] = "date"
     row_timeout: Optional[float] = None  # Per-row timeout in seconds (None = no timeout)
 
     def __post_init__(self):
@@ -91,23 +91,36 @@ class ColumnConfig:
     prompt: str = "prompt"
     config: str = "config"
     tools: Optional[str] = "tools"
+    response_id: str = "response_id"
+    custom_id: str = "custom_id"
 
 
 @dataclass
 class RetrievalConfig:
-    """Configuration for retrieve_batch_responses() — polling OpenAI background responses.
+    """Configuration for retrieve_background_responses() — polling OpenAI background responses.
 
     Separates polling params (how long to wait for completion) from execution params
     (concurrency, timeouts, logging).
 
+    The ``source`` field controls where the retriever looks for pending responses:
+
+    - ``"memory"`` (default): only use response IDs captured in-memory during ``run()``;
+      never touches the file system or S3.  Returns empty when no IDs are available.
+    - ``"local"``: auto-discover pending responses from local Parquet files.
+    - ``"s3"``: auto-discover pending responses from S3.
+
+    It only affects the *read* side — new retrieval events are always written to the
+    full configured storage regardless of this setting.
+
     Example:
         config = RetrievalConfig(
+            source="s3",            # discover pending responses from S3
             poll_interval=30.0,     # check every 30 seconds
             max_poll_attempts=40,   # give up after ~20 minutes
             batch_size=50,          # 50 concurrent polls
-            checkpoint_file="./retrieval_checkpoint.parquet",
         )
     """
+    source: Literal["memory", "local", "s3"] = "memory"  # where to read pending responses from
     poll_interval: float = 30.0       # seconds between status checks when response is pending
     max_poll_attempts: int = 40       # max polls per response before giving up (40 × 30s ≈ 20 min)
     batch_size: int = 50              # number of concurrent requests
